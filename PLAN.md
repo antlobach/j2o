@@ -127,7 +127,7 @@ All 18 measured samples reported zero response mismatches and zero load-generato
 
 The native static-file path does less application/runtime work and remains a ceiling, not a like-for-like Ring comparison. RSS includes the entire Jolt process. Thread counts are process snapshots during load, not a claim that every runtime background thread has been classified.
 
-Single-request profiling uses fresh server processes for collection off, sampled timing, sampled allocation, CPU sampling, and an idle control. Three alternating-order rounds use concurrency one, a two-second validated warmup and three-second measured window. Timing and allocation modes select approximately one in eight request IDs with deterministic mixing and cap storage at 32,768 native records. The same carrier executes adjacent empty observer marks before the measured window for calibration.
+Single-request profiling uses fresh server processes for profiling off, sampled timing, sampled allocation, CPU sampling, and an idle control. GC stays enabled in every mode. Three alternating-order rounds use concurrency one, a two-second validated warmup and three-second measured window. Timing and allocation modes select approximately one in eight request IDs with deterministic mixing and cap storage at 32,768 native records. The same carrier executes adjacent empty observer marks before the measured window for calibration.
 
 All 14 stage timestamps use native `CLOCK_MONOTONIC`. Boundaries distinguish native snapshot preparation, ingress queue handoff, request decoding, fiber dispatch, handler invocation, response encoding, output-buffer marshalling, native submission, outbound queue handoff, and the H2O send call. Queue handoff includes wakeup and scheduling; the final timestamp is `h2o_send_inline` return, not wire flush. Their sum is a server-side interval, not the client's complete latency.
 
@@ -141,6 +141,66 @@ CPU scope is explicit: Chez statistics reports the calling thread's CPU time, wh
 
 Profiling correctness checks exercise actual binary requests, explicit collection, same-connection Var redefinition, concurrent identities, bounded recording overflow, and deadline cleanup. Invalid or competing stage sequences freeze rather than being exported as completed successful traces. The native sanitizer probe also runs with recording enabled across repeated teardown. Existing GC, protocol, validation, and sanitizer gates remain prerequisites to runner measurements.
 
+## Single-request profile: verified runner results
+
+[Verified run and raw artifacts](https://github.com/antlobach/j2o/actions/runs/44954325909), commit `a838a2a264d42387b71fffbd9b44d815212d946c`. All correctness, GC positive/negative controls, HTTP/2, sanitizer, benchmark, and profiling gates passed. Measurements ran only on GitHub Actions, not the development machine.
+
+Ubuntu 22.04 runner, four logical CPUs on AMD EPYC 7763; Jolt v0.8.27, pinned external H2O, OpenSSL 3.0.2. This differs from the Intel runner used for the earlier baseline; do not attribute cross-run differences to code.
+
+### Observer controls
+
+Each row is the median of three fresh-process windows. Client latency is wrk's latency, not the sum of server stages. Allocation and process CPU use server admissions as the denominator.
+
+| Mode | Requests/sec | Client p50 µs | Client p99 µs | Managed bytes/admission | Process CPU µs/admission |
+|---|---:|---:|---:|---:|---:|
+| Profiling off | 5,849 | 161 | 219 | 19,515 | 145.79 |
+| Sampled timings | 5,769 | 163 | 221 | 19,508 | 147.40 |
+| Sampled allocations | 5,768 | 164 | 226 | 19,512 | 147.25 |
+| CPU sampling | 5,891 | 158 | 215 | 19,562 | 144.64 |
+
+Timing and allocation modes show approximately 1.4% lower median throughput than profiling off; the CPU-sampling median is 0.7% higher. These are observed differences on a shared runner, not precise causal overhead estimates. Adjacent empty marks have median intervals of 140 ns for timing and 420 ns for allocation collection; allocation calibration has median zero bytes, mean 0.44 bytes per interval. Do not subtract these calibration values from every request as if observer effects were constant.
+
+### Server-side stages
+
+Pooled across three timing captures: 6,838 complete traces, mean total 133.52 µs, p50 128.68 µs, p95 165.30 µs, p99 183.21 µs. Stage percentiles use nearest-rank observations; individual stage percentiles must not be added to obtain a request percentile.
+
+| Stage | Mean µs | p50 µs | p95 µs | Share of total mean |
+|---|---:|---:|---:|---:|
+| Native request snapshot | 0.918 | 0.301 | 7.274 | 0.69% |
+| Ingress handoff through decode start | 53.812 | 52.288 | 71.697 | 40.30% |
+| Request marshalling | 13.599 | 13.836 | 16.281 | 10.19% |
+| Fiber creation and dispatch | 21.902 | 21.931 | 25.278 | 16.40% |
+| Handler invocation | 1.092 | 1.082 | 1.293 | 0.82% |
+| Response validation and encoding | 3.026 | 3.026 | 3.387 | 2.27% |
+| Output FFI marshalling | 2.369 | 2.345 | 2.755 | 1.77% |
+| Native response-command copy/enqueue | 0.083 | 0.080 | 0.101 | 0.06% |
+| Egress handoff | 16.842 | 14.367 | 22.745 | 12.61% |
+| H2O send call | 19.878 | 20.579 | 25.178 | 14.89% |
+
+Ingress/egress handoffs and fiber dispatch account for 69.32% of the measured server-side mean. Handoff intervals combine queueing, wakeup, and scheduling; this capture does not independently attribute time to each of those mechanisms. The H2O send stage ends at `h2o_send_inline` return, not network flush.
+
+### Allocation and CPU observations
+
+Pooled across 6,760 complete allocation traces. These are process-wide counter differences during the named interval, not exclusive allocation ownership.
+
+| Interval | Mean bytes | p50 bytes |
+|---|---:|---:|
+| Request marshalling | 2,432 | 2,432 |
+| Fiber creation and dispatch | 6,288 | 5,152 |
+| Handler invocation | 400 | 400 |
+| Response validation and encoding | 192 | 192 |
+| Output FFI buffer | 320 | 320 |
+| Decode start through output-buffer readiness | 9,632 | 8,496 |
+
+The off-control whole-window median is about 19.1 KiB per admission; the instrumented managed intervals do not cover dispatch cleanup, poller activity, or all runtime work. The idle-control median is 11,424 bytes/sec. Known native request packets are 61 bytes and response commands 62 bytes for this payload; those counts exclude H2O pools and other native allocations. GC CPU in the off control is 0.30 µs/admission, so these observations do not support treating GC pauses as the primary latency cost.
+
+CPU sampling captured 1,609 stacks representing 1,661.46 ms of sampled Jolt CPU. Leading self-time entries include `jolt.io-poller/process-events!` (15.36%), `poller-loop` (9.98%), `assoc-in` (7.03%), and `vec-reduce-general` (6.72%). These percentages describe sampled managed execution, not total process CPU; they exclude the native H2O thread and are not a wall-time breakdown.
+
+### Accounting and next decision
+
+All 15 profiling windows completed: 216,564 client-validated responses and 216,566 server admissions/answers, with two final unreported answers within the one-in-flight bound, zero stale replies, zero mismatches, and zero load-generator failures. All sampled traces completed with no recording overflow. Every profiling server's stderr was empty. The accompanying 18 benchmark samples validated 1,923,406 responses with zero mismatches or failures; benchmark shutdown reported zero live packets and connections.
+
+Prioritize investigation of readiness-poller wakeup and request-fiber scheduling before optimizing response copies or adding zero-copy ownership. The stage distribution and sampled stacks support that order, but do not yet establish which internal operation causes the handoff cost. Preserve the existing transport, response validation, fiber/Var semantics, and GC-safety gates for any optimization.
 
 ## Experiment limits, not public API promises
 

@@ -47,3 +47,5 @@ H2O's protocol behavior is the baseline; matching the older adapter's rejection 
 The `Experiments` GitHub Actions workflow runs correctness gates first, then benchmarks unmodified H2O and the experimental Jolt bridge with validated identical response bytes. It saves environment metadata, raw wrk output, throughput, p50/p95/p99 latency, thread counts, and RSS. The benchmark refuses to run outside Linux GitHub Actions.
 
 The native static-file server is a transport ceiling, not an equivalent Ring application. Shared-runner results characterize this experiment; they are not a production performance guarantee.
+
+Measured runner results and the implementation sequence are in [PLAN.md](PLAN.md#runner-baseline-2026-11-21). Raw samples, environment metadata, and load-generator output are attached to the linked GitHub run.

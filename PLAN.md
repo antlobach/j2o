@@ -108,6 +108,28 @@ Measure the external unmodified H2O static-file server versus a separate Jolt br
 
 Interpret native H2O as a transport ceiling, not an equivalent Ring stack or proof of a production speed claim. Do not optimize by skipping validation, truncating binary data, disabling GC safety, weakening limits, or dropping lifecycle cleanup. Profile the measured bridge cost before considering batching, buffer reuse, fewer FFI crossings, or pinned buffers. Every optimization must preserve the same correctness gates.
 
+## Runner baseline: 2026-11-21
+
+[Verified run and raw artifacts](https://github.com/antlobach/j2o/actions/runs/44929790959), commit `4856326185621b4b4806a18c221c239e3409fa9e`. All correctness, GC, HTTP/2, address/undefined-behavior/leak sanitizer, and benchmark gates passed.
+
+Ubuntu 22.04 GitHub runner; four logical CPUs on Intel Xeon Platinum 8573C; Jolt v0.8.27; H2O 2.3.0-DEV at the pinned revision; OpenSSL 3.0.2; GCC 11.4; wrk 4.1.0. Each cell below is the median of three per-run measurements, not a percentile of pooled latency samples.
+
+| Server | Concurrency | Requests/sec | p50 µs | p95 µs | p99 µs | OS threads | RSS MiB |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Native H2O | 1 | 26,555 | 34 | 46 | 59 | 2 | 7.8 |
+| j2o experiment | 1 | 7,714 | 124 | 154 | 188 | 5 | 117.9 |
+| Native H2O | 16 | 101,703 | 129 | 187 | 212 | 2 | 7.9 |
+| j2o experiment | 16 | 56,965 | 263 | 316 | 472 | 6 | 118.3 |
+| Native H2O | 64 | 101,674 | 290 | 630 | 672 | 2 | 7.9 |
+| j2o experiment | 64 | 73,101 | 814 | 970 | 1,098 | 6 | 118.8 |
+
+All 18 measured samples reported zero response mismatches and zero load-generator failures, covering 3,368,087 measured requests. Warmup responses were validated as well. The j2o server completed 2,084,963 total requests including warmups, with matching answered/disposed counts, zero rejected or stale responses, zero live request packets at shutdown, and empty benchmark stderr.
+
+The native static-file path does less application/runtime work and remains a ceiling, not a like-for-like Ring comparison. RSS includes the entire Jolt process. Thread counts are process snapshots during load, not a claim that every runtime background thread has been classified.
+
+Next performance work: profile the single-flight dispatch/response path, where latency differs most from native H2O; distinguish marshalling, queue wakeups, scheduling, and runtime allocation before choosing an optimization. Retain the validated wire behavior, GC controls, and lifetime checks for every comparison.
+
+
 ## Experiment limits, not public API promises
 
 The probe has a fixed loopback listener, a small request/body cap, one named carrier, limited Ring fields, only string/byte response bodies, a simple response queue, no streaming/TLS/WebSocket/middleware API, and forced shutdown. It does not yet propagate every native disconnect into fiber cancellation. Its native H2O build currently omits wslay and optional compression integration. These are explicit boundaries of a feasibility experiment, not a partial implementation advertised as production-ready.

@@ -303,6 +303,7 @@ error:
 
 int j2o_probe_port(probe_server *server) { return server->port; }
 int j2o_probe_fd(probe_server *server) { return server->notify[0]; }
+size_t j2o_probe_response_limit(void) { return MAX_RESPONSE; }
 
 request_packet *j2o_probe_take(probe_server *server)
 {

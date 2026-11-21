@@ -20,12 +20,15 @@
 (ffi/defcfn native-field "j2o_probe_field" [:pointer :int :pointer] :pointer)
 (ffi/defcfn native-release "j2o_probe_release" [:pointer :pointer] :void :blocking)
 (ffi/defcfn native-respond "j2o_probe_respond" [:pointer :uint64 :int :pointer :size_t] :int :blocking)
+(ffi/defcfn native-response-limit "j2o_probe_response_limit" [] :size_t)
 (ffi/defcfn native-stat "j2o_probe_stat" [:pointer :int] :uint64)
 (ffi/defcfn native-stop "j2o_probe_stop" [:pointer] :void :blocking)
 (ffi/defcfn native-destroy "j2o_probe_destroy" [:pointer] :void :blocking)
 (ffi/defcfn native-hold "j2o_probe_hold" [:uint] :void :blocking)
 (ffi/defcfn unsafe-native-hold "j2o_probe_hold" [:uint] :void)
 (ffi/defcfn native-hold-active "j2o_probe_hold_active" [] :int)
+
+(def max-response-bytes (native-response-limit))
 
 (defn read-field [packet field bytes?]
   (ffi/with-out [size :size_t]
@@ -51,17 +54,24 @@
            :body (when (pos? (alength bytes)) (java.io.ByteArrayInputStream. bytes))})
         (finally (native-release native packet))))))
 
-(defn respond! [native id response]
-  (let [body (:body response)
-        bytes (cond
+(defn body-bytes [body]
+  (let [bytes (cond
                 (nil? body) (byte-array 0)
                 (string? body) (.getBytes body "UTF-8")
                 (bytes? body) body
                 :else (throw (ex-info "Probe supports string/byte-array bodies only" {})))]
-    (ffi/with-alloc [data (max 1 (alength bytes))]
-      (ffi/write-array data bytes)
-      (when-not (zero? (native-respond native id (:status response) data (alength bytes)))
-        (throw (ex-info "Native response submission failed" {:id id}))))))
+    (when (> (alength bytes) max-response-bytes)
+      (throw (ex-info "Probe response exceeds native buffer limit" {})))
+    bytes))
+
+(defn respond-bytes! [native id status bytes]
+  (ffi/with-alloc [data (max 1 (alength bytes))]
+    (ffi/write-array data bytes)
+    (when-not (zero? (native-respond native id status data (alength bytes)))
+      (throw (ex-info "Native response submission failed" {:id id})))))
+
+(defn respond! [native id response]
+  (respond-bytes! native id (:status response) (body-bytes (:body response))))
 
 (defn stats [server]
   (into {} (map-indexed (fn [i k] [k (native-stat (:native server) i)])
@@ -89,9 +99,10 @@
                    (let [id (:j2o.experiment/id request)
                          terminal (atom false)
                          reply (fn [response]
-                                 (when (compare-and-set! terminal false true)
-                                   (respond! native id response)
-                                   true))
+                                 (let [bytes (body-bytes (:body response))]
+                                   (when (compare-and-set! terminal false true)
+                                     (respond-bytes! native id (:status response) bytes)
+                                     true)))
                          task (fib/spawn
                                 (fn []
                                   (try

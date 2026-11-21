@@ -127,7 +127,7 @@
     (try
       (compare-protocol! port (:port reference))
       (hot-reload! server)
-      (doseq [path ["/throw" "/nil" "/invalid"]]
+      (doseq [path ["/throw" "/nil" "/invalid" "/oversized-response"]]
         (check! [:handler-error path] 500 (:status (wire/request! port path))))
       (let [bytes (byte-array (map unchecked-byte [0 255 128 13 10 206 187 240 159 152 128]))]
         (check! :binary-request-response (vec bytes)

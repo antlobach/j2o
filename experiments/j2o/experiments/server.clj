@@ -26,6 +26,7 @@
     "/throw" (throw (ex-info "deliberate handler failure" {}))
     "/nil" nil
     "/invalid" {:status 200 :body 42}
+    "/oversized-response" {:status 200 :body (byte-array (inc bridge/max-response-bytes))}
     "/gc" {:status 200 :body (str (collect!))}
     "/hang" (try
                (async/<!! (async/chan))

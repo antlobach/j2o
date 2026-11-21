@@ -115,8 +115,23 @@ int main(void)
         assert(j2o_probe_stat(server, 2) == 3);
         close(pending);
         j2o_probe_destroy(server);
-        int extra = socket(AF_INET, SOCK_STREAM, 0);
-        assert(extra >= 0);
+        int extra;
+        struct sockaddr_in local = {0};
+        local.sin_family = AF_INET;
+        local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        /* A stopped ephemeral listener port can otherwise become the client's
+         * own source port on Linux, producing a TCP self-connection. */
+        for (int attempt = 0;; ++attempt) {
+            assert(attempt < 100);
+            extra = socket(AF_INET, SOCK_STREAM, 0);
+            assert(extra >= 0);
+            local.sin_port = 0;
+            assert(bind(extra, (struct sockaddr *)&local, sizeof(local)) == 0);
+            socklen_t length = sizeof(local);
+            assert(getsockname(extra, (struct sockaddr *)&local, &length) == 0);
+            if (ntohs(local.sin_port) != port) break;
+            close(extra);
+        }
         struct sockaddr_in address = {0};
         address.sin_family = AF_INET;
         address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -126,6 +141,9 @@ int main(void)
         close(extra);
         assert(kill(child, SIGTERM) == 0);
         assert(waitpid(child, NULL, 0) == child);
+        if (accepted != -1 || error != ECONNREFUSED)
+            fprintf(stderr, "Stopped-port probe: connect=%d errno=%d source=%u target=%d\n",
+                    accepted, error, ntohs(local.sin_port), port);
         assert(accepted == -1 && error == ECONNREFUSED);
     }
     puts("PASS: native binary boundaries, stale replies, and pending-request teardown (10 lifecycles)");

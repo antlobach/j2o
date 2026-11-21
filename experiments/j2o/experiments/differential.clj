@@ -59,12 +59,27 @@
       [(signature (wire/response! client)) (signature (wire/response! client))]
       (finally (wire/close! client)))))
 
+(defn mixed-framing-closes! [port]
+  (let [client (wire/connect port)]
+    (try
+      (wire/send! client
+                  (str "GET /plaintext HTTP/1.1\r\nHost: localhost\r\n"
+                       "Content-Length: 0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+                       "GET /plaintext HTTP/1.1\r\nHost: localhost\r\n\r\n"))
+      (let [response (wire/response! client)]
+        (check! :mixed-framing-response 200 (:status response))
+        (check! :mixed-framing-announces-close "close" (get-in response [:headers "connection"]))
+        (check! :mixed-framing-closes-before-next-request -1 (.read (:in client))))
+      (finally (wire/close! client)))))
+
 (defn compare-protocol! [port reference-port]
   (doseq [method ["GET" "HEAD"]]
     (check! [:native-reference method]
             (signature (wire/request! reference-port method "/plaintext" nil))
             (signature (wire/request! port method "/plaintext" nil))))
   (check! :native-reference-pipelining (keepalive! reference-port) (keepalive! port))
+  (mixed-framing-closes! reference-port)
+  (mixed-framing-closes! port)
   (doseq [[label request]
           [[:conflicting-content-length
             "GET /plaintext HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx"]

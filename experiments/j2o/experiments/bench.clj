@@ -57,7 +57,7 @@
                  :kernel (run-command ["uname" "-a"])
                  :cpu (run-command ["lscpu"])
                  :compiler (run-command ["cc" "--version"])
-                 :load-generator (run-command ["wrk" "--version"])}))
+                 :load-generator (run-command ["dpkg-query" "-W" "-f=${Version}\n" "wrk"])}))
   (let [reference (differential/start-reference!)
         builder (ProcessBuilder. ["jolt" "-m" "j2o.experiments.bench-server"])
         _ (.redirectError builder (io/file ".cache/results/j2o-server-stderr.txt"))

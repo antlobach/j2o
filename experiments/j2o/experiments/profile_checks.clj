@@ -3,6 +3,7 @@
             [j2o.experiments.differential :as checks]
             [j2o.experiments.profiling :as profiling]
             [j2o.experiments.profile-server :as server]
+            [j2o.experiments.profile-run :as runner]
             [j2o.experiments.wire :as wire]
             [jolt.fibers :as fib]))
 
@@ -77,8 +78,36 @@
         (bridge/stop! server)
         (fib/shutdown! clients)))))
 
+(defn timed-stop-accounting! []
+  (let [load {:requests 10 :concurrency 1}
+        trace {:considered 11 :completed 10 :incomplete 1 :dropped 0
+               :last-id 42 :stages (vec (range 14))
+               :incomplete-records [{:id 42 :stage-mask 8191}]}
+        result {:admitted 11 :answered 10 :stale 1 :trace-info trace}]
+    (checks/check! :timed-stop-keeps-count-domains-separate
+                   {:validated-client-completions 10 :client-stop-inflight-admissions 1
+                    :client-stop-inflight-answers 0 :client-stop-inflight-stale 1}
+                   (runner/validate-capture! load result))
+    (checks/check! :timed-stop-can-answer-unreported-tail 1
+                   (:client-stop-inflight-answers
+                     (runner/validate-capture! load (assoc result :answered 11 :stale 0 :trace-info nil))))
+    (doseq [[label invalid]
+            [[:cannot-hide-lost-reply (assoc result :answered 9)]
+             [:cannot-exceed-inflight-bound (assoc result :admitted 12 :answered 11)]
+             [:cannot-hide-earlier-disconnect (assoc result :answered 9 :stale 2)]
+             [:cannot-hide-earlier-incomplete
+              (assoc-in result [:trace-info :incomplete-records 0 :id] 41)]
+             [:cannot-hide-interrupted-handler
+              (assoc-in result [:trace-info :incomplete-records 0 :stage-mask] 127)]
+             [:cannot-hide-recording-overflow (assoc-in result [:trace-info :dropped] 1)]
+             [:cannot-hide-missing-admission (assoc-in result [:trace-info :considered] 10)]]]
+      (checks/check! label true
+                     (try (runner/validate-capture! load invalid) false
+                          (catch clojure.lang.ExceptionInfo _ true))))))
+
 (defn -main [& _]
   (try
+    (timed-stop-accounting!)
     (doseq [mode [:timings :allocations]]
       (bounded! mode)
       (concurrent-and-deadline! mode))

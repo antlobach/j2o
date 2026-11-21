@@ -116,6 +116,7 @@ int main(void)
         int port = j2o_probe_port(server);
         j2o_probe_stop(server);
         assert(j2o_probe_stat(server, 5) == 0);
+        assert(j2o_probe_stat(server, 6) == 0);
         assert(j2o_probe_stat(server, 2) == 3);
         if (round % 2 != 0) {
             uint64_t data[PROFILE_WORDS];

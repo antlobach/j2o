@@ -10,6 +10,30 @@
     (when-not (= expected reply)
       (throw (ex-info "Profiling server protocol failed" {:command command :expected expected :reply reply})))))
 
+(defn validate-capture! [load result]
+  (let [info (:trace-info result)
+        client-completed (or (:requests load) 0)
+        tail (- (:admitted result) client-completed)]
+    ;; wrk can abandon its final reply, but cannot explain lost admissions,
+    ;; nonterminal work, or a stale reply from earlier in the window.
+    (when-not (and (= (:admitted result) (+ (:answered result) (:stale result)))
+                   (<= 0 tail (or (:concurrency load) 0))
+                   (<= 0 (:stale result) tail))
+      (throw (ex-info "Server accounting exceeds the timed-stop in-flight bound"
+                      {:load load :result result :tail tail})))
+    (when (and info
+               (or (pos? (:dropped info)) (zero? (:completed info))
+                   (not= (:considered info) (:admitted result))
+                   (> (:incomplete info) (:stale result))
+                   (not-every? #(and (= (:id %) (:last-id info))
+                                     (= (:stage-mask %)
+                                        (dec (bit-shift-left 1 (dec (count (:stages info)))))))
+                               (:incomplete-records info))))
+      (throw (ex-info "Profiling capture contains an unexplained incomplete trace" {:info info})))
+    {:validated-client-completions client-completed :client-stop-inflight-admissions tail
+     :client-stop-inflight-answers (- (:answered result) client-completed)
+     :client-stop-inflight-stale (:stale result)}))
+
 (defn run-mode! [mode round]
   (let [destination (str ".cache/results/profile-" (name mode) "-r" round)
         label (keyword (str "profile-" (name mode)))
@@ -31,17 +55,13 @@
                      (bench/sample! label port (.pid process) 1 round false))]
           (command! writer reader "end" "ENDED")
           (let [result (edn/read-string (slurp (str destination ".edn")))
-                info (:trace-info result)]
-            (when-not (= (or (:requests load) 0) (:answered result))
-              (throw (ex-info "Profiling counters do not match validated requests" {:load load :result result})))
-            (when (and info (or (pos? (:dropped info)) (pos? (:incomplete info))
-                                (zero? (:completed info))))
-              (throw (ex-info "Profiling capture lost complete request coverage" {:info info})))
+                accounting (validate-capture! load result)]
             (when (= :cpu mode)
               (let [cpu (edn/read-string (slurp (str destination "-cpu.edn")))]
                 (when-not (pos? (reduce + 0 (map :samples (:counts cpu))))
                   (throw (ex-info "CPU sampler produced no samples" {})))))
-            (merge {:mode mode :round round :destination destination} load result))))
+            (merge {:mode mode :round round :destination destination}
+                   accounting load result))))
       (finally
         (when (.isAlive process)
           (.write writer "stop\n") (.flush writer))
@@ -73,6 +93,8 @@
                  :queue-intervals :handoff-wakeup-and-scheduling-combined
                  :final-native-stage :send-inline-return-not-wire-flush
                  :known-native-bytes :packet-and-response-command-only
+                 :counter-denominator :server-admitted-after-connection-close
+                 :client-stop-tail :at-most-one-unreported-answer-per-nonpipelined-connection
                  :caution :shared-runner-noise-no-production-performance-guarantee}))
   (let [rows (atom [])]
     (try

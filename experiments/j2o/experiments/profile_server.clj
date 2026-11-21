@@ -10,9 +10,9 @@
   (checks/eventually!
     :profile-quiescence
     #(let [stats (bridge/stats server)]
-       (and (= (:admitted stats) (:answered stats))
+       (and (= (:admitted stats) (+ (:answered stats) (:stale stats)))
             (empty? @(:handlers server)) (empty? @(:supervisors server))
-            (zero? (:live-packets stats))))))
+            (zero? (:live-packets stats)) (zero? (:connections stats))))))
 
 (defn -main [mode-name destination]
   (when-not (and (= "true" (System/getenv "GITHUB_ACTIONS"))
@@ -27,7 +27,7 @@
         observer (:profile server)
         calibration (atom nil)
         before (atom nil)
-        answered-before (atom nil)]
+        native-before (atom nil)]
     (println "READY" (:port server)) (flush)
     (try
       (loop []
@@ -40,7 +40,7 @@
           "begin"
           (do (when @before (throw (ex-info "Profiling window already started" {})))
               (quiesce! server)
-              (reset! answered-before (:answered (bridge/stats server)))
+              (reset! native-before (bridge/stats server))
               (reset! before (profiling/counters))
               (when observer (profiling/recording! observer true))
               (when (= :cpu mode) (profile/sample! {:interval-ms 1 :depth 64}))
@@ -61,7 +61,9 @@
                                  :stacks (vec (profile/samples))}))
                   (profile/write-folded (str destination "-cpu.folded")))
                 (spit (str destination ".edn")
-                      (pr-str {:mode mode :answered (- (:answered stats) @answered-before)
+                      (pr-str {:mode mode :answered (- (:answered stats) (:answered @native-before))
+                               :admitted (- (:admitted stats) (:admitted @native-before))
+                               :stale (- (:stale stats) (:stale @native-before))
                                :counters (profiling/counter-delta @before after)
                                :stats stats :trace-info (when trace (dissoc trace :records))
                                :observer-calibration @calibration})))

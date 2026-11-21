@@ -52,4 +52,6 @@ The native static-file server is a transport ceiling, not an equivalent Ring app
 
 The workflow also profiles single-request latency in fresh server processes with collection off, sampled stage timing, sampled allocation counters, and CPU sampling. It records observer calibration and an idle allocation control. Timing and allocation collection are separate from the CPU-sampling run; all modes retain response validation. Stage records are native-owned, capped, and exported only after completion. Queue intervals include wakeup and scheduling; `h2o_send_inline` returning does not mean bytes have reached the client.
 
+Profiling preserves both load-generator completions and server admissions: wrk can stop with one unreported reply per non-pipelined connection. Windows wait for closed connections and settled native/fiber work; only a final transport-stale trace may be incomplete. Allocation snapshots combine live and reclaimed bytes within one GC epoch, and process CPU is reported separately from the controller thread's CPU.
+
 Measured runner results and the implementation sequence are in [PLAN.md](PLAN.md#runner-baseline-2026-11-21). Raw samples, environment metadata, and load-generator output are attached to the linked GitHub run.

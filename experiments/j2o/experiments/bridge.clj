@@ -78,7 +78,7 @@
 
 (defn stats [server]
   (into {} (map-indexed (fn [i k] [k (native-stat (:native server) i)])
-                       [:admitted :answered :stale :disposed :rejected :live-packets])))
+                       [:admitted :answered :stale :disposed :rejected :live-packets :connections])))
 
 (defn start!
   ([handler] (start! handler {}))

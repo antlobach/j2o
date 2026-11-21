@@ -53,6 +53,7 @@ typedef struct {
 typedef struct connection {
     struct connection *next, **previous;
     h2o_socket_t *socket;
+    probe_server *server;
 } connection;
 
 struct probe_server {
@@ -72,6 +73,7 @@ struct probe_server {
     uint64_t next_id;
     _Atomic int stopping;
     _Atomic uint64_t admitted, answered, stale, disposed, rejected, packets;
+    _Atomic uint64_t connection_count;
     _Atomic(profile_state *) profile;
 };
 static _Atomic int hold_active;
@@ -191,6 +193,7 @@ static void on_socket_closed(void *data)
     connection *item = data;
     *item->previous = item->next;
     if (item->next != NULL) item->next->previous = item->previous;
+    atomic_fetch_sub(&item->server->connection_count, 1);
     free(item);
 }
 
@@ -202,9 +205,11 @@ static void on_accept(h2o_socket_t *listener, const char *error)
     if (socket == NULL) return;
     connection *item = malloc(sizeof(*item));
     if (item == NULL) { h2o_socket_close(socket); return; }
-    *item = (connection){server->connections, &server->connections, socket};
+    *item = (connection){.next = server->connections, .previous = &server->connections,
+                         .socket = socket, .server = server};
     if (item->next != NULL) item->next->previous = &item->next;
     server->connections = item;
+    atomic_fetch_add(&server->connection_count, 1);
     socket->on_close.cb = on_socket_closed;
     socket->on_close.data = item;
     h2o_accept(&server->accept, socket);
@@ -369,7 +374,7 @@ void j2o_probe_profile_scratch_reset(profile_trace *trace)
 uint64_t j2o_probe_profile_info(probe_server *server, unsigned field)
 {
     profile_state *state = atomic_load_explicit(&server->profile, memory_order_acquire);
-    assert(state != NULL && field < 5);
+    assert(state != NULL && field < 6);
     switch (field) {
     case 0: return atomic_load(&state->considered);
     case 1: {
@@ -378,8 +383,18 @@ uint64_t j2o_probe_profile_info(probe_server *server, unsigned field)
     }
     case 2: return atomic_load(&state->dropped);
     case 3: return state->stride;
-    default: return state->capacity;
+    case 4: return state->capacity;
+    default: return atomic_load(&state->last_id);
     }
+}
+uint64_t j2o_probe_profile_identity(probe_server *server, size_t index, unsigned field)
+{
+    profile_state *state = atomic_load_explicit(&server->profile, memory_order_acquire);
+    assert(state != NULL && index < state->capacity && field < 2);
+    profile_trace *trace = state->records + index;
+    uint32_t seen = atomic_load_explicit(&trace->seen, memory_order_acquire);
+    /* The first stage publishes the immutable ID; never read unpublished data. */
+    return field == 1 ? seen : (seen == 0 ? 0 : trace->data[0]);
 }
 int j2o_probe_profile_copy(probe_server *server, size_t index, uint64_t *out, size_t words)
 {
@@ -451,7 +466,8 @@ uint64_t j2o_probe_stat(probe_server *server, int field)
     case 2: return atomic_load(&server->stale);
     case 3: return atomic_load(&server->disposed);
     case 4: return atomic_load(&server->rejected);
-    default: return atomic_load(&server->packets);
+    case 5: return atomic_load(&server->packets);
+    default: return atomic_load(&server->connection_count);
     }
 }
 

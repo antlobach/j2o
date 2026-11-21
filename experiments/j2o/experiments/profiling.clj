@@ -17,12 +17,18 @@
 (ffi/defcfn mark-native "j2o_probe_profile_mark" [:pointer :uint :uint64 :uint64] :void)
 (ffi/defcfn trace-value "j2o_probe_profile_value" [:pointer :uint :uint] :uint64)
 (ffi/defcfn info-native "j2o_probe_profile_info" [:pointer :uint] :uint64)
+(ffi/defcfn identity-native "j2o_probe_profile_identity" [:pointer :size_t :uint] :uint64)
 (ffi/defcfn copy-native "j2o_probe_profile_copy" [:pointer :size_t :pointer :size_t] :int :blocking)
 
-;; Chez's occupied-byte count alone falls when GC reclaims objects. Adding
-;; deallocated bytes yields cumulative allocation, as statistics does.
-(def allocated-bytes (scheme/eval-string "(lambda () (+ (bytes-allocated) (bytes-deallocated)))"))
+;; Combine live and reclaimed bytes from one GC epoch. Collection between the
+;; reads otherwise overcounts reclaimed objects and makes the next mark decrease.
+(def allocated-bytes
+  (scheme/eval-string
+    "(lambda () (let loop () (let* ([epoch (collections)] [live (bytes-allocated)] [freed (bytes-deallocated)]) (if (= epoch (collections)) (+ live freed) (loop)))))"))
 (def collections (scheme/eval-string "(lambda () (collections))"))
+(def process-cpu-nanos
+  (scheme/eval-string
+    "(lambda () (let ([t (current-time 'time-process)]) (+ (* (time-second t) 1000000000) (time-nanosecond t))))"))
 
 (defn create! [native {:keys [mode stride capacity]
                        :or {stride 8 capacity 32768}}]
@@ -52,13 +58,14 @@
 (defn capture [context]
   (let [n (count (:stages context))
         info (into {} (map-indexed (fn [i k] [k (info-native (:native context) i)])
-                                   [:considered :retained :dropped :stride :capacity]))]
+                                   [:considered :retained :dropped :stride :capacity :last-id]))]
     (ffi/with-alloc [out (* 8 (:words context))]
-      (let [records
+      (let [all-records
             (into []
-                  (keep (fn [index]
+                  (map (fn [index]
                           (case (copy-native (:native context) index out (:words context))
-                            0 nil
+                            0 {:id (identity-native (:native context) index 0)
+                               :stage-mask (identity-native (:native context) index 1)}
                             1 (let [data (vec (ffi/read-array out :uint64 (:words context)))]
                                 {:id (nth data 0)
                                  :ns (subvec data 1 (+ 1 n))
@@ -67,9 +74,11 @@
                                  :packet-native-bytes (nth data (+ 1 (* 3 n)))
                                  :response-native-bytes (nth data (+ 2 (* 3 n)))})
                             (throw (ex-info "Native profile copy rejected" {:index index})))))
-                  (range (:retained info)))]
+                  (range (:retained info)))
+            records (filterv :ns all-records)
+            incomplete (filterv #(not (:ns %)) all-records)]
         (assoc info :stages (:stages context) :mode (:mode context)
-               :completed (count records) :incomplete (- (:retained info) (count records))
+               :completed (count records) :incomplete (count incomplete) :incomplete-records incomplete
                :records records)))))
 
 (defn calibrate! [context pool]
@@ -91,8 +100,14 @@
                 (range 256))))
       {:pool pool})))
 
-(defn counters [] (profile/stats*))
+(defn counters []
+  (let [stats (profile/stats*)]
+    (-> stats
+        (assoc :calling-thread-cpu-nanos (:cpu-nanos stats) :process-cpu-nanos (process-cpu-nanos)
+               :allocated-bytes (allocated-bytes))
+        (dissoc :cpu-nanos))))
 
 (defn counter-delta [before after]
   (into {} (map (fn [k] [k (- (get after k) (get before k))])
-                [:cpu-nanos :real-nanos :gc-count :gc-cpu-nanos :allocated-bytes])))
+                [:calling-thread-cpu-nanos :process-cpu-nanos :real-nanos :gc-count
+                 :gc-cpu-nanos :allocated-bytes])))

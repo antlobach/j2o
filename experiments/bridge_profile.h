@@ -31,7 +31,7 @@ typedef struct {
     size_t capacity;
     unsigned stride;
     _Atomic int enabled;
-    _Atomic uint64_t considered, selected, dropped;
+    _Atomic uint64_t considered, selected, dropped, last_id;
     profile_trace *records;
 } profile_state;
 
@@ -63,6 +63,7 @@ static profile_trace *profile_select(profile_state *state, uint64_t id)
 {
     if (state == NULL || !atomic_load_explicit(&state->enabled, memory_order_acquire)) return NULL;
     atomic_fetch_add(&state->considered, 1);
+    atomic_store(&state->last_id, id);
     /* Deterministic mixing avoids sampling the same low-bit periodic phase. */
     uint64_t mixed = id + UINT64_C(0x9e3779b97f4a7c15);
     mixed = (mixed ^ (mixed >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);

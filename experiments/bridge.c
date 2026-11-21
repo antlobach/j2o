@@ -17,6 +17,8 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
+#include <assert.h>
+#include "bridge_profile.h"
 
 #define CAPACITY 64
 #define MAX_BODY 4096
@@ -32,6 +34,7 @@ typedef struct {
     uint64_t id;
     size_t method_len, path_len, body_len;
     int version;
+    profile_trace *trace;
     char data[];
 } request_packet;
 typedef struct {
@@ -39,6 +42,7 @@ typedef struct {
     uint64_t id;
     size_t len;
     int status;
+    profile_trace *trace;
     char body[];
 } response_message;
 typedef struct {
@@ -68,6 +72,7 @@ struct probe_server {
     uint64_t next_id;
     _Atomic int stopping;
     _Atomic uint64_t admitted, answered, stale, disposed, rejected, packets;
+    _Atomic(profile_state *) profile;
 };
 static _Atomic int hold_active;
 
@@ -94,6 +99,8 @@ static void request_disposed(void *data)
 static int on_request(h2o_handler_t *handler, h2o_req_t *request)
 {
     probe_server *server = ((probe_handler *)handler)->server;
+    profile_trace *trace = profile_select(atomic_load_explicit(&server->profile, memory_order_acquire),
+                                          server->next_id + 1);
     if (request->entity.len > MAX_BODY || request->path.len > MAX_PATH || request->method.len > 32) {
         h2o_send_error_generic(request, 413, "Payload Too Large", "probe input limit", 0);
         return 0;
@@ -117,6 +124,8 @@ static int on_request(h2o_handler_t *handler, h2o_req_t *request)
     packet->path_len = request->path.len;
     packet->body_len = request->entity.len;
     packet->version = request->version;
+    packet->trace = trace;
+    if (trace != NULL) trace->data[PROFILE_PACKET_BYTES] = sizeof(*packet) + bytes;
     memcpy(packet->data, request->method.base, packet->method_len);
     memcpy(packet->data + packet->method_len, request->path.base, packet->path_len);
     if (packet->body_len != 0)
@@ -139,6 +148,7 @@ static int on_request(h2o_handler_t *handler, h2o_req_t *request)
     ++server->count;
     atomic_fetch_add(&server->packets, 1);
     atomic_fetch_add(&server->admitted, 1);
+    profile_stamp(trace, P_QUEUED, 0, 0);
     notify_locked(server);
     pthread_mutex_unlock(&server->mutex);
     return 0;
@@ -150,6 +160,7 @@ static void on_messages(h2o_multithread_receiver_t *receiver, h2o_linklist_t *me
     while (!h2o_linklist_is_empty(messages)) {
         response_message *message = H2O_STRUCT_FROM_MEMBER(response_message, super.link, messages->next);
         h2o_linklist_unlink(&message->super.link);
+        profile_stamp(message->trace, P_RESPONSE_RECEIVED, 0, 0);
         h2o_req_t *request = NULL;
         for (size_t i = 0; i < CAPACITY; ++i) {
             if (server->slots[i].id == message->id) {
@@ -166,6 +177,7 @@ static void on_messages(h2o_multithread_receiver_t *receiver, h2o_linklist_t *me
             h2o_add_header(&request->pool, &request->res.headers, H2O_TOKEN_CONTENT_TYPE,
                            NULL, H2O_STRLIT("application/octet-stream"));
             h2o_send_inline(request, message->body, message->len);
+            profile_stamp(message->trace, P_SEND_RETURN, 0, 0);
             atomic_fetch_add(&server->answered, 1);
         } else {
             atomic_fetch_add(&server->stale, 1);
@@ -305,6 +317,80 @@ int j2o_probe_port(probe_server *server) { return server->port; }
 int j2o_probe_fd(probe_server *server) { return server->notify[0]; }
 size_t j2o_probe_response_limit(void) { return MAX_RESPONSE; }
 
+int j2o_probe_profile_configure(probe_server *server, size_t capacity, unsigned stride)
+{
+    if (capacity == 0 || capacity > 65536 || stride == 0 || (stride & (stride - 1)) != 0 ||
+        atomic_load(&server->profile) != NULL) return -1;
+    profile_state *state = calloc(1, sizeof(*state));
+    if (state == NULL) return -1;
+    state->records = calloc(capacity, sizeof(*state->records));
+    if (state->records == NULL) { free(state); return -1; }
+    state->capacity = capacity;
+    state->stride = stride;
+    profile_state *expected = NULL;
+    if (!atomic_compare_exchange_strong_explicit(&server->profile, &expected, state,
+                                                  memory_order_release, memory_order_relaxed)) {
+        profile_dispose(state);
+        return -1;
+    }
+    return 0;
+}
+
+int j2o_probe_profile_recording(probe_server *server, int enabled)
+{
+    profile_state *state = atomic_load_explicit(&server->profile, memory_order_acquire);
+    if (state == NULL) return -1;
+    atomic_store_explicit(&state->enabled, enabled != 0, memory_order_release);
+    return 0;
+}
+
+profile_trace *j2o_probe_profile_trace(request_packet *packet) { return packet->trace; }
+size_t j2o_probe_profile_words(void) { return PROFILE_WORDS; }
+size_t j2o_probe_profile_record_bytes(void) { return sizeof(profile_trace); }
+unsigned j2o_probe_profile_stages(void) { return P_STAGE_COUNT; }
+const char *j2o_probe_profile_stage_name(unsigned stage)
+{
+    assert(stage < P_STAGE_COUNT);
+    return profile_stage_names[stage];
+}
+void j2o_probe_profile_mark(profile_trace *trace, unsigned stage, uint64_t allocated, uint64_t collections)
+{
+    profile_stamp(trace, stage, allocated, collections);
+}
+uint64_t j2o_probe_profile_value(profile_trace *trace, unsigned kind, unsigned stage)
+{
+    assert(kind < 3 && stage < P_STAGE_COUNT);
+    return trace->data[1 + kind * P_STAGE_COUNT + stage];
+}
+void j2o_probe_profile_scratch_reset(profile_trace *trace)
+{
+    atomic_store(&trace->seen, (UINT32_C(1) << P_DECODE_START) - 1);
+}
+uint64_t j2o_probe_profile_info(probe_server *server, unsigned field)
+{
+    profile_state *state = atomic_load_explicit(&server->profile, memory_order_acquire);
+    assert(state != NULL && field < 5);
+    switch (field) {
+    case 0: return atomic_load(&state->considered);
+    case 1: {
+        uint64_t selected = atomic_load(&state->selected);
+        return selected < state->capacity ? selected : state->capacity;
+    }
+    case 2: return atomic_load(&state->dropped);
+    case 3: return state->stride;
+    default: return state->capacity;
+    }
+}
+int j2o_probe_profile_copy(probe_server *server, size_t index, uint64_t *out, size_t words)
+{
+    profile_state *state = atomic_load_explicit(&server->profile, memory_order_acquire);
+    if (state == NULL || words < PROFILE_WORDS || index >= state->capacity) return -1;
+    profile_trace *trace = state->records + index;
+    if (atomic_load_explicit(&trace->seen, memory_order_acquire) != PROFILE_ALL_STAGES) return 0;
+    memcpy(out, trace->data, sizeof(trace->data));
+    return 1;
+}
+
 request_packet *j2o_probe_take(probe_server *server)
 {
     pthread_mutex_lock(&server->mutex);
@@ -317,6 +403,7 @@ request_packet *j2o_probe_take(probe_server *server)
         packet = server->queue[server->head];
         server->head = (server->head + 1) % CAPACITY;
         --server->count;
+        profile_stamp(packet->trace, P_DEQUEUED, 0, 0);
     }
     pthread_mutex_unlock(&server->mutex);
     return packet;
@@ -338,8 +425,9 @@ void j2o_probe_release(probe_server *server, request_packet *packet)
     atomic_fetch_sub(&server->packets, 1);
 }
 
-int j2o_probe_respond(probe_server *server, uint64_t id, int status, const char *body, size_t len)
+int j2o_probe_respond(probe_server *server, uint64_t id, int status, const char *body, size_t len, profile_trace *trace)
 {
+    profile_stamp(trace, P_SUBMIT_ENTER, 0, 0);
     if (len > MAX_RESPONSE || status < 200 || status > 599 || atomic_load(&server->stopping)) return -1;
     response_message *message = malloc(sizeof(*message) + len);
     if (message == NULL) return -1;
@@ -347,7 +435,10 @@ int j2o_probe_respond(probe_server *server, uint64_t id, int status, const char 
     message->id = id;
     message->status = status;
     message->len = len;
+    message->trace = trace;
+    if (trace != NULL) trace->data[PROFILE_RESPONSE_BYTES] = sizeof(*message) + len;
     if (len != 0) memcpy(message->body, body, len);
+    profile_stamp(trace, P_RESPONSE_QUEUED, 0, 0);
     h2o_multithread_send_message(&server->receiver, &message->super);
     return 0;
 }
@@ -381,6 +472,7 @@ void j2o_probe_destroy(probe_server *server)
     close(server->notify[0]); close(server->notify[1]);
     pthread_mutex_destroy(&server->mutex);
     pthread_cond_destroy(&server->ready);
+    profile_dispose(atomic_load(&server->profile));
     free(server);
 }
 

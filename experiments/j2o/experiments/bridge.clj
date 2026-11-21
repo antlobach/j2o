@@ -1,5 +1,6 @@
 (ns j2o.experiments.bridge
   (:require [clojure.string :as str]
+            [j2o.experiments.profiling :as profiling]
             [jolt.ffi :as ffi]
             [jolt.fibers :as fib]
             [jolt.io-poller :as poller]))
@@ -19,7 +20,7 @@
 (ffi/defcfn native-version "j2o_probe_version" [:pointer] :int)
 (ffi/defcfn native-field "j2o_probe_field" [:pointer :int :pointer] :pointer)
 (ffi/defcfn native-release "j2o_probe_release" [:pointer :pointer] :void :blocking)
-(ffi/defcfn native-respond "j2o_probe_respond" [:pointer :uint64 :int :pointer :size_t] :int :blocking)
+(ffi/defcfn native-respond "j2o_probe_respond" [:pointer :uint64 :int :pointer :size_t :pointer] :int :blocking)
 (ffi/defcfn native-response-limit "j2o_probe_response_limit" [] :size_t)
 (ffi/defcfn native-stat "j2o_probe_stat" [:pointer :int] :uint64)
 (ffi/defcfn native-stop "j2o_probe_stop" [:pointer] :void :blocking)
@@ -36,10 +37,11 @@
           n (ffi/read size :size_t)]
       (if bytes? (ffi/read-array data n) (ffi/read-bytes data n)))))
 
-(defn take-request [native port]
+(defn take-request [native port observer]
   (let [packet (native-take native)]
     (when-not (ffi/null? packet)
       (try
+        (when observer (profiling/decoding! observer packet))
         (let [target (read-field packet 1 false)
               query (.indexOf target "?")
               bytes (read-field packet 2 true)]
@@ -64,14 +66,15 @@
       (throw (ex-info "Probe response exceeds native buffer limit" {})))
     bytes))
 
-(defn respond-bytes! [native id status bytes]
+(defn respond-bytes! [native id status bytes observer trace]
   (ffi/with-alloc [data (max 1 (alength bytes))]
     (ffi/write-array data bytes)
-    (when-not (zero? (native-respond native id status data (alength bytes)))
+    (when observer (profiling/mark! observer trace :submit-ready))
+    (when-not (zero? (native-respond native id status data (alength bytes) trace))
       (throw (ex-info "Native response submission failed" {:id id})))))
 
 (defn respond! [native id response]
-  (respond-bytes! native id (:status response) (body-bytes (:body response))))
+  (respond-bytes! native id (:status response) (body-bytes (:body response)) nil 0))
 
 (defn stats [server]
   (into {} (map-indexed (fn [i k] [k (native-stat (:native server) i)])
@@ -79,7 +82,7 @@
 
 (defn start!
   ([handler] (start! handler {}))
-  ([handler {:keys [timeout-ms] :or {timeout-ms 0}}]
+  ([handler {:keys [timeout-ms stage-profile] :or {timeout-ms 0}}]
    (when-not (or (fn? handler) (var? handler))
      (throw (ex-info "Handler must be a function or Var" {})))
    (let [native (native-start)]
@@ -87,6 +90,13 @@
      (let [port (native-port native)
            fd (native-fd native)
            pool (fib/pool {:name :j2o-probe :size 1})
+           observer (when stage-profile
+                      (try (profiling/create! native stage-profile)
+                           (catch Throwable t
+                             (native-stop native)
+                             (native-destroy native)
+                             (fib/shutdown! pool)
+                             (throw t))))
            running (atom true)
            handlers (atom {})
            supervisors (atom {})
@@ -95,20 +105,27 @@
            (fib/spawn
              (fn []
                (while @running
-                 (if-let [request (take-request native port)]
+                 (if-let [request (take-request native port observer)]
                    (let [id (:j2o.experiment/id request)
+                         trace (if observer @(:last-trace observer) 0)
+                         _ (when observer (profiling/mark! observer trace :request-decoded))
                          terminal (atom false)
                          reply (fn [response]
                                  (let [bytes (body-bytes (:body response))]
                                    (when (compare-and-set! terminal false true)
-                                     (respond-bytes! native id (:status response) bytes)
+                                     (when observer (profiling/mark! observer trace :response-encoded))
+                                     (respond-bytes! native id (:status response) bytes observer trace)
                                      true)))
-                         task (fib/spawn
+                         task (do
+                                (when observer (profiling/mark! observer trace :fiber-enqueued))
+                                (fib/spawn
                                 (fn []
+                                  (when observer (profiling/mark! observer trace :handler-start))
                                   (try
                                     (let [target @registered
                                           f (if (var? target) @target target)
                                           response (f request)]
+                                      (when observer (profiling/mark! observer trace :handler-return))
                                       (when-not (and (map? response)
                                                      (integer? (:status response))
                                                      (<= 200 (:status response) 599)
@@ -119,7 +136,7 @@
                                       (reply response))
                                     (catch Throwable _
                                       (reply {:status 500 :body "handler failed"}))))
-                                {:pool pool})]
+                                {:pool pool}))]
                      (swap! handlers assoc id task)
                      (fib/monitor! task (fn [_] (swap! handlers dissoc id)))
                      (when (pos? timeout-ms)
@@ -135,7 +152,7 @@
                    (poller/wait-ready fd :read))))
              {:pool pool})]
        {:native native :port port :fd fd :pool pool :running running
-        :handlers handlers :supervisors supervisors :registered registered :dispatch dispatch}))))
+        :handlers handlers :supervisors supervisors :registered registered :dispatch dispatch :profile observer}))))
 
 (defn stop! [server]
   (reset! (:running server) false)

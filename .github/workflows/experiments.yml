@@ -56,10 +56,14 @@ jobs:
         run: jolt -m j2o.experiments.differential
       - name: HTTP/2 against native reference
         run: jolt -m j2o.experiments.http2
+      - name: Profiling identity, bounded storage, GC, and deadline correctness
+        run: jolt -m j2o.experiments.profile-checks
       - name: Native address and undefined-behavior sanitizers
         run: CC=clang bash experiments/native_safety.sh
       - name: Runner-only performance comparison
         run: jolt -m j2o.experiments.bench
+      - name: Runner-only single-request stage, allocation, and CPU profiles
+        run: jolt -m j2o.experiments.profile-run
       - name: Save raw experiment artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

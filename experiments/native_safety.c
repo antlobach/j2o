@@ -66,6 +66,10 @@ int main(void)
     for (int round = 0; round < 10; ++round) {
         probe_server *server = j2o_probe_start();
         assert(server != NULL);
+        if (round % 2 != 0) {
+            assert(j2o_probe_profile_configure(server, 2, 1) == 0);
+            assert(j2o_probe_profile_recording(server, 1) == 0);
+        }
         const size_t lengths[] = {0, 1, MAX_BODY};
         for (size_t test = 0; test < sizeof(lengths) / sizeof(lengths[0]); ++test) {
             int client = connect_client(server);
@@ -81,8 +85,8 @@ int main(void)
             assert(received == length);
             assert(memcmp(body, payload, length) == 0);
             uint64_t id = j2o_probe_id(packet);
-            assert(j2o_probe_respond(server, id, 200, NULL, MAX_RESPONSE + 1) == -1);
-            assert(j2o_probe_respond(server, id, 200, body, length) == 0);
+            assert(j2o_probe_respond(server, id, 200, NULL, MAX_RESPONSE + 1, NULL) == -1);
+            assert(j2o_probe_respond(server, id, 200, body, length, j2o_probe_profile_trace(packet)) == 0);
             j2o_probe_release(server, packet);
             assert(read_header(client) == 200);
             size_t offset = 0;
@@ -93,7 +97,7 @@ int main(void)
             }
             assert(memcmp(result, payload, length) == 0);
             close(client);
-            assert(j2o_probe_respond(server, id, 200, "late", 4) == 0);
+            assert(j2o_probe_respond(server, id, 200, "late", 4, NULL) == 0);
         }
         int oversized = connect_client(server);
         const char *header = "POST /echo HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 4097\r\n\r\n";
@@ -113,6 +117,13 @@ int main(void)
         j2o_probe_stop(server);
         assert(j2o_probe_stat(server, 5) == 0);
         assert(j2o_probe_stat(server, 2) == 3);
+        if (round % 2 != 0) {
+            uint64_t data[PROFILE_WORDS];
+            assert(j2o_probe_profile_info(server, 1) == 2);
+            assert(j2o_probe_profile_info(server, 2) == j2o_probe_profile_info(server, 0) - 2);
+            /* Native-only replies have no managed stages: never export them as complete. */
+            assert(j2o_probe_profile_copy(server, 0, data, PROFILE_WORDS) == 0);
+        }
         close(pending);
         j2o_probe_destroy(server);
         int extra;

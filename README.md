@@ -24,6 +24,7 @@ jolt -m j2o.experiments.gc safe
 jolt -m j2o.experiments.gc unsafe
 jolt -m j2o.experiments.differential
 jolt -m j2o.experiments.http2
+jolt -m j2o.experiments.profile-checks
 bash experiments/native_safety.sh
 ```
 
@@ -39,6 +40,7 @@ The `unsafe` GC probe is an intentional negative control, isolated in its own pr
 - Native H2O comparisons for GET/HEAD, pipelining, and selected framing/parser cases.
 - Explicit collections during native waits and concurrent HTTP traffic.
 - ASan/UBSan on the bridge's native binary boundaries and teardown paths. H2O itself is an external, uninstrumented dependency in this sanitizer experiment.
+- Optional bounded profiling records: request identity across concurrent fibers, cumulative allocation across collections, recording-cap overflow without HTTP admission loss, and incomplete deadline traces excluded from successful captures.
 
 H2O's protocol behavior is the baseline; matching the older adapter's rejection policy is not a requirement. The selected revision accepts some framing/line-ending inputs that `ring-chez-adapter` rejects. Wire-level safety gates concern correct message boundaries, required connection closure, and isolation—not identical rejection. Permissible leniency must still be distinguished from genuinely ambiguous framing.
 
@@ -47,5 +49,7 @@ H2O's protocol behavior is the baseline; matching the older adapter's rejection 
 The `Experiments` GitHub Actions workflow runs correctness gates first, then benchmarks unmodified H2O and the experimental Jolt bridge with validated identical response bytes. It saves environment metadata, raw wrk output, throughput, p50/p95/p99 latency, thread counts, and RSS. The benchmark refuses to run outside Linux GitHub Actions.
 
 The native static-file server is a transport ceiling, not an equivalent Ring application. Shared-runner results characterize this experiment; they are not a production performance guarantee.
+
+The workflow also profiles single-request latency in fresh server processes with collection off, sampled stage timing, sampled allocation counters, and CPU sampling. It records observer calibration and an idle allocation control. Timing and allocation collection are separate from the CPU-sampling run; all modes retain response validation. Stage records are native-owned, capped, and exported only after completion. Queue intervals include wakeup and scheduling; `h2o_send_inline` returning does not mean bytes have reached the client.
 
 Measured runner results and the implementation sequence are in [PLAN.md](PLAN.md#runner-baseline-2026-11-21). Raw samples, environment metadata, and load-generator output are attached to the linked GitHub run.

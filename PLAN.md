@@ -127,7 +127,13 @@ All 18 measured samples reported zero response mismatches and zero load-generato
 
 The native static-file path does less application/runtime work and remains a ceiling, not a like-for-like Ring comparison. RSS includes the entire Jolt process. Thread counts are process snapshots during load, not a claim that every runtime background thread has been classified.
 
-Next performance work: profile the single-flight dispatch/response path, where latency differs most from native H2O; distinguish marshalling, queue wakeups, scheduling, and runtime allocation before choosing an optimization. Retain the validated wire behavior, GC controls, and lifetime checks for every comparison.
+Single-request profiling uses fresh server processes for collection off, sampled timing, sampled allocation, CPU sampling, and an idle control. Three alternating-order rounds use concurrency one, a two-second validated warmup and three-second measured window. Timing and allocation modes select approximately one in eight request IDs with deterministic mixing and cap storage at 32,768 native records. The same carrier executes adjacent empty observer marks before the measured window for calibration.
+
+All 14 stage timestamps use native `CLOCK_MONOTONIC`. Boundaries distinguish native snapshot preparation, ingress queue handoff, request decoding, fiber dispatch, handler invocation, response encoding, output-buffer marshalling, native submission, outbound queue handoff, and the H2O send call. Queue handoff includes wakeup and scheduling; the final timestamp is `h2o_send_inline` return, not wire flush. Their sum is a server-side interval, not the client's complete latency.
+
+Allocation counters are process-wide cumulative Chez allocation, including runtime and observer work, not exclusive per-function allocation. The raw counter adds currently occupied and deallocated bytes, matching the cumulative calculation documented by [Chez Scheme](https://cisco.github.io/ChezScheme/csug10.0/system.html#./system:s87). Whole-window deltas and idle controls supplement sampled stage deltas. Known native byte counts cover only request packets and response commands, not all H2O allocation. CPU samples cover active Jolt threads, not the native H2O event-loop thread. The off control retains dormant hook branches, so enabling overhead is not a comparison against an older uninstrumented binary.
+
+Profiling correctness checks exercise actual binary requests, explicit collection, same-connection Var redefinition, concurrent identities, bounded recording overflow, and deadline cleanup. Invalid or competing stage sequences freeze rather than being exported as completed successful traces. The native sanitizer probe also runs with recording enabled across repeated teardown. Existing GC, protocol, validation, and sanitizer gates remain prerequisites to runner measurements.
 
 
 ## Experiment limits, not public API promises

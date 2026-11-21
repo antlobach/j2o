@@ -28,12 +28,13 @@ Environment: Jolt v0.8.27; external H2O revision `d3e43fcf00c3e6b17826b95d2d362d
 | GC controls | Explicit collection completes while collect-safe native work is still running, but not during the corresponding unmarked call | Preserve collect-safe transitions on every potentially long native call |
 | GC under traffic | Explicit collections complete while concurrent real HTTP requests succeed | Keep collection-progress checks in CI, not just a no-crash assertion |
 | Native sanitizers | ASan/UBSan probe exercises zero/one/max binary bodies, oversized responses, stale replies, and pending teardown over ten server lifecycles | Extend these boundary/lifetime scenarios as the ABI grows; the external H2O library is not instrumented by this probe |
+| Thread-cache lifetime | Linux LeakSanitizer detected caches surviving loop-thread exit in the initial embedding | Run H2O's periodic cache maintenance and explicitly release its thread-local recyclers before the owning thread exits; keep leak detection enabled |
 
 ## Important compatibility finding
 
-The selected unmodified H2O revision accepts bare-LF requests, conflicting Content-Length fields in the exercised case, and Content-Length plus chunked Transfer-Encoding (the latter is handled with forced connection close in H2O). The bridge and native reference agree. `ring-chez-adapter` documents stricter rejection.
+The selected H2O revision returns 200 for the exercised bare-LF, conflicting Content-Length, and Content-Length plus chunked Transfer-Encoding requests. These cases have different requirements: [RFC 9112 §2.2](https://www.rfc-editor.org/rfc/rfc9112.html#section-2.2) permits single-LF parsing; [§6.1](https://www.rfc-editor.org/rfc/rfc9112.html#section-6.1) permits processing Transfer-Encoding with mandatory connection closure; [§6.3](https://www.rfc-editor.org/rfc/rfc9112.html#section-6.3) requires rejecting conflicting Content-Length values without Transfer-Encoding. H2O's source forces closure for the mixed-header case. Acceptance of conflicting lengths in this revision needs standards-compliance investigation; matching the reference alone does not certify correct framing.
 
-This is **not** a hardened-parser certification or evidence that ambiguous framing is safe with every intermediary. Strict parity requires an explicit decision backed by wire-level tests: supported upstream configuration/API, a suitable upstream version/fix, or a documented compatibility difference approved before release. Do not silently claim equivalent rejection, do not hand-roll a second HTTP parser in Clojure, and do not vendor a private H2O fork.
+Protocol behavior follows supported H2O versions. Compatibility tests verify standards-required behavior, message boundaries, connection closure, and request isolation rather than identical rejection policies. Permitted leniency and ambiguous framing require separate analysis. H2O remains an external dependency; j2o does not add a second HTTP parser or maintain a private H2O fork.
 
 ## Native and GC invariants
 
@@ -76,7 +77,7 @@ Acceptance: slow-reader backpressure, bounded memory, HTTP/2 stream isolation, s
 
 ### 4. Complete lifecycle and failure API
 
-Expose `j2o.adapter/run-server`, `stop-server`, `swap-handler!`, `swap-ws-handler!`, and `server-stats` with the agreed contracts. Keep function/Var support consistent across handler, WebSocket handler, guard, and failure callback.
+Expose `j2o.adapter/run-server`, `stop-server`, `swap-handler!`, `swap-ws-handler!`, and `server-stats`. Functions and Vars have consistent semantics across the handler, WebSocket handler, guard, and failure callback.
 
 Implement graceful draining and forced shutdown, not just the experiment's forced teardown. Distinguish application failures from server faults. Preserve useful default status behavior and failure metadata, but use j2o's namespace rather than compatibility aliases.
 

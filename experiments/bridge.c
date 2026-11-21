@@ -206,7 +206,8 @@ static int open_listener(probe_server *server)
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     socklen_t len = sizeof(address);
-    if (bind(fd, (struct sockaddr *)&address, len) != 0 || listen(fd, 128) != 0 ||
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 ||
+        bind(fd, (struct sockaddr *)&address, len) != 0 || listen(fd, 128) != 0 ||
         getsockname(fd, (struct sockaddr *)&address, &len) != 0) {
         int saved = errno; close(fd); errno = saved; return -1;
     }
@@ -238,7 +239,10 @@ static void *run_loop(void *data)
     pthread_cond_signal(&server->ready);
     pthread_mutex_unlock(&server->mutex);
     if (result == 0) {
-        while (!atomic_load(&server->stopping)) h2o_evloop_run(server->context.loop, INT32_MAX);
+        while (!atomic_load(&server->stopping)) {
+            uint32_t max_wait = h2o_cleanup_thread(h2o_now(server->context.loop), &server->context);
+            h2o_evloop_run(server->context.loop, max_wait);
+        }
         h2o_evloop_run(server->context.loop, 0);
         h2o_socket_close(server->listener);
         h2o_context_request_shutdown(&server->context);
@@ -261,6 +265,11 @@ static void *run_loop(void *data)
     h2o_context_dispose(&server->context);
     h2o_evloop_destroy(loop);
     h2o_config_dispose(&server->config);
+    /* These caches are thread-local: release them before the owning thread exits.
+     * Explicit full clear is needed even after periodic cleanup has run. */
+    h2o_buffer_clear_recycle(1);
+    h2o_socket_clear_recycle(1);
+    h2o_mem_clear_recycle(&h2o_mem_pool_allocator, 1);
     return NULL;
 }
 

@@ -4,6 +4,11 @@
 #include <poll.h>
 #include <stdio.h>
 #include <sys/time.h>
+#include <spawn.h>
+#include <signal.h>
+#include <sys/wait.h>
+
+extern char **environ;
 
 static int connect_client(probe_server *server)
 {
@@ -101,11 +106,27 @@ int main(void)
         send_all(pending, request, strlen(request));
         request_packet *packet = take_packet(server);
         j2o_probe_release(server, packet);
+        pid_t child;
+        char *arguments[] = {"sleep", "10", NULL};
+        assert(posix_spawn(&child, "/bin/sleep", NULL, NULL, arguments, environ) == 0);
+        int port = j2o_probe_port(server);
         j2o_probe_stop(server);
         assert(j2o_probe_stat(server, 5) == 0);
         assert(j2o_probe_stat(server, 2) == 3);
         close(pending);
         j2o_probe_destroy(server);
+        int extra = socket(AF_INET, SOCK_STREAM, 0);
+        assert(extra >= 0);
+        struct sockaddr_in address = {0};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = htons(port);
+        int accepted = connect(extra, (struct sockaddr *)&address, sizeof(address));
+        int error = errno;
+        close(extra);
+        assert(kill(child, SIGTERM) == 0);
+        assert(waitpid(child, NULL, 0) == child);
+        assert(accepted == -1 && error == ECONNREFUSED);
     }
     puts("PASS: native binary boundaries, stale replies, and pending-request teardown (10 lifecycles)");
     return 0;

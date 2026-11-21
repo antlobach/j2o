@@ -40,7 +40,7 @@ The `unsafe` GC probe is an intentional negative control, isolated in its own pr
 - Explicit collections during native waits and concurrent HTTP traffic.
 - ASan/UBSan on the bridge's native binary boundaries and teardown paths. H2O itself is an external, uninstrumented dependency in this sanitizer experiment.
 
-Matching H2O is not proof of stricter Ring compatibility: the selected native revision accepts some framing/line-ending inputs that `ring-chez-adapter` rejects. This is a production-readiness and compatibility gate, not a claim that the experimental bridge is hardened.
+H2O's protocol behavior is the baseline; matching the older adapter's rejection policy is not a requirement. The selected revision accepts some framing/line-ending inputs that `ring-chez-adapter` rejects. Wire-level safety gates concern correct message boundaries, required connection closure, and isolation—not identical rejection. Permissible leniency must still be distinguished from genuinely ambiguous framing.
 
 ## Performance
 

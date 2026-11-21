@@ -36,6 +36,8 @@ case "$(uname -s)" in
     ;;
   *) echo "This experiment currently builds on macOS or Linux only" >&2; exit 1 ;;
 esac
+# Upstream configure probes may emit temporary headers in their working directory.
+cd "$dependency_dir"
 cmake -S "$source_dir" -B "$build_dir" \
   -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
   -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_BUILD_WITH_INSTALL_NAME_DIR=ON \

@@ -1,0 +1,111 @@
+# j2o implementation plan
+
+## Target contract
+
+An embedded H2O Ring adapter for Jolt, with synchronous one-argument handlers running on fibers. Application code explicitly offloads carrier-blocking work. Functions and Vars are accepted; resolving a Var happens once at the beginning of an invocation. Handler replacement affects subsequent invocations, including on existing connections. No async Ring callback arity, automatic handler executor, or direct-on-H2O handler mode.
+
+H2O remains an external, dynamically linked dependency. Do not copy H2O source or binaries into j2o, and do not statically bundle H2O into the bridge. The experiment builds an unmodified pinned revision in an external cache only to make its observations reproducible. Production packaging should consume a supported external H2O development/runtime package and verify the ABI at startup.
+
+## Evidence already obtained
+
+Environment: Jolt v0.8.27; external H2O revision `d3e43fcf00c3e6b17826b95d2d362d646185918a` (library 0.16); OpenSSL 3. Local execution is correctness/feasibility only. Performance measurements belong to GitHub runners.
+
+| Experiment | Observed behavior | Design consequence |
+|---|---|---|
+| Single-carrier fibers | 128 fibers complete waits; another fiber runs while a synchronous helper waits | Use `jolt.fibers/spawn` directly; do not depend on core.async's default `go` backend, which is threads |
+| Native FFI control | An explicitly collect-safe native sleep still holds its carrier | GC-safe does not mean fiber-safe; applications must explicitly offload blocking native work |
+| Explicit offload | A native-thread operation does not hold the request carrier; an error envelope propagates failure | Document the offload pattern without automatic detection or hidden executors |
+| Var and swap behavior | Var roots update on subsequent invocations; captured function values retain the old entry; an existing invocation retains its selected entry | Store the supplied target, resolve once in the request fiber, never cache a Var root at startup |
+| Dynamic bindings | Spawned fibers inherit caller bindings; the parent binding remains unchanged | Establish explicit request bindings when dispatching; do not accidentally inherit startup/REPL bindings as request state |
+| Cancellation | `kill!` bypasses catch-all code, runs `finally`, wakes a channel waiter without consuming its next value, and stops a computing fiber | Handler deadlines are feasible on this runtime without native-thread handler execution |
+| Actual embedded HTTP | H2O callback dispatches into Jolt; a synchronous handler observes `in-fiber? = true`; response crosses back to the owning loop | Keep H2O pointers loop-confined and exchange opaque IDs plus owned bytes |
+| HTTP/1 differential | GET, HEAD metadata/body suppression, and pipelining match unmodified standalone H2O | Reuse H2O framing, with additional Ring response policy explicitly verified |
+| HTTP/2 | curl prior-knowledge HTTP/2 succeeds against both servers; the handler sees HTTP/2 | Basic H2 embedding works; multiplexing, flow control, resets, and TLS/ALPN still require dedicated gates |
+| Request handling | Binary round-trip and fragmented chunked upload succeed; body cap rejects oversized input | Expose a byte-faithful InputStream over owned bounded request bytes initially |
+| Admission | 64 parked handlers coexist on one carrier; an extra request gets 503; admitted requests finish after release | Bound pending work independently of carrier count; make production limits configurable |
+| Errors/reload | Throw, nil response, invalid body, and invalid Var root fail the request; subsequent requests on the same connection recover | Keep request failures inside the request boundary, with one `:on-failure` attempt |
+| Lifetime | Unknown/late IDs do not corrupt a following response; disconnect/release succeeds; stop runs cleanup and closes the port; repeated starts work | Native request destruction must invalidate IDs; shutdown must join all users before freeing bridge state |
+| GC controls | Explicit collection completes while collect-safe native work is still running, but not during the corresponding unmarked call | Preserve collect-safe transitions on every potentially long native call |
+| GC under traffic | Explicit collections complete while concurrent real HTTP requests succeed | Keep collection-progress checks in CI, not just a no-crash assertion |
+| Native sanitizers | ASan/UBSan probe exercises zero/one/max binary bodies, oversized responses, stale replies, and pending teardown over ten server lifecycles | Extend these boundary/lifetime scenarios as the ABI grows; the external H2O library is not instrumented by this probe |
+
+## Important compatibility finding
+
+The selected unmodified H2O revision accepts bare-LF requests, conflicting Content-Length fields in the exercised case, and Content-Length plus chunked Transfer-Encoding (the latter is handled with forced connection close in H2O). The bridge and native reference agree. `ring-chez-adapter` documents stricter rejection.
+
+This is **not** a hardened-parser certification or evidence that ambiguous framing is safe with every intermediary. Strict parity requires an explicit decision backed by wire-level tests: supported upstream configuration/API, a suitable upstream version/fix, or a documented compatibility difference approved before release. Do not silently claim equivalent rejection, do not hand-roll a second HTTP parser in Clojure, and do not vendor a private H2O fork.
+
+## Native and GC invariants
+
+Reference: [jjson's collect-safe design](https://github.com/antlobach/jjson/blob/main/src/jjson.clj) and [its native transition rules](https://github.com/antlobach/jjson/blob/main/native/jjson_chez.c).
+
+1. Native H2O threads never call Scheme/Jolt and never own managed references.
+2. Request pointers and H2O pools are accessed only on their owning event loop.
+3. Native waits, joins, locks, variable-size copies, allocation, and destruction use collect-safe FFI transitions. Only bounded scalar/field accessors remain unmarked.
+4. The current ABI transfers only native allocations. No pointer to movable managed bytes may outlive a call. Any later zero-copy design must pin/lock the exact object, retain it for the entire native lifetime, and release it on every completion/cancellation/error path. Being collect-safe alone is not sufficient.
+5. Deactivated C code must not allocate Scheme objects or call Scheme.
+6. Wakeup descriptors are nonblocking. Jolt waits through its readiness poller, not a blocking FFI wait on a carrier. Cancellation and poller deregistration precede descriptor close/reuse.
+7. Exactly one terminal outcome wins per request. A deadline, disconnect, handler completion, and shutdown must not each submit a response.
+8. Native destruction cannot occur until dispatch, request fibers, deadline supervisors, and all native callers have finished. A timeout while joining is an error, not permission to free live state.
+
+## Production implementation sequence
+
+### 1. Establish the supported external dependency and ABI
+
+Select supported H2O/OpenSSL package versions and platforms. Verify the parser finding above. Ship a small j2o-owned bridge with opaque server/request/buffer handles, explicit ownership/result codes, ABI version checks, and no H2O struct layouts in Clojure.
+
+Keep dependency install/build tooling separate from runtime startup. Missing/incompatible dependencies should fail with actionable diagnostics before binding listeners. The experimental automatic source build is not the settled production installer.
+
+Acceptance: clean dynamic linkage, supported-version matrix, byte/length boundaries under sanitizers, startup rollback with no leaked fd/thread, and verified package use without any H2O content in the repository.
+
+### 2. Complete request lifecycle and Ring mapping
+
+Implement listener configuration, atomic IPv4/IPv6/hostname binding, unified port zero, optional reuse-port, complete Ring fields/headers, peer addresses, URI/raw-target policy, header/body limits, and arrival/idle/write deadlines.
+
+Use per-loop generation-safe request IDs. Add native destruction/cancellation events back into Jolt, not only ID invalidation. Bound admitted requests, dispatch queues, queued response commands, connection counts, and total queued bytes independently. Snapshot handler targets at invocation.
+
+Acceptance: same-connection redefinition, no cross-request byte leakage, overload behavior, deadlines versus completion races, cancellation before dispatch and after dispatch, startup/stop races, and failure recovery.
+
+### 3. Finish body and long-lived-stream support
+
+Add File, InputStream, sequence, and channel response bodies. File/stream reads supplied by the adapter must not block carriers. Pull body data only when transport capacity allows; enforce per-stream and server-wide byte budgets. Known lengths must match bytes actually sent; unknown lengths must use protocol-appropriate framing. HEAD/204/304/bodyless behavior needs independent cases.
+
+SSE is a body policy over the same streaming path. An idle disconnected stream must cancel its producer without requiring another event to be emitted.
+
+Acceptance: slow-reader backpressure, bounded memory, HTTP/2 stream isolation, stream failure after headers, idle disconnect, producer cancellation, and release of every native buffer on all terminal paths.
+
+### 4. Complete lifecycle and failure API
+
+Expose `j2o.adapter/run-server`, `stop-server`, `swap-handler!`, `swap-ws-handler!`, and `server-stats` with the agreed contracts. Keep function/Var support consistent across handler, WebSocket handler, guard, and failure callback.
+
+Implement graceful draining and forced shutdown, not just the experiment's forced teardown. Distinguish application failures from server faults. Preserve useful default status behavior and failure metadata, but use j2o's namespace rather than compatibility aliases.
+
+For handler deadlines, use verified fiber-local kill plus an atomic terminal claim. Cancellation remains cooperative at runtime safe points: a fiber blocked in arbitrary foreign code cannot be forcibly unwound until control returns. A deadline does not promise to terminate application-owned offload threads.
+
+Acceptance: finally/catch behavior, compute-stuck and parked handlers, late completion after timeout, streaming duration independent of handler deadline, and shutdown with keep-alive/HTTP2/streaming work.
+
+### 5. WebSockets and middleware parity
+
+Use external H2O/wslay transport capabilities, subject to package availability. Preserve pre-upgrade guard behavior and a synchronous session API on a fiber. Verify message limits, UTF-8, masking, fragmentation, control frames, ping/pong, close codes, write limits, and disconnect cancellation. H2 WebSocket support is not implied by HTTP/1 upgrade support.
+
+Port or extract transport-independent multipart, trusted-proxy, gzip/zstd, SSE, fault-response, and static-file behavior with attribution. Reuse existing dependencies such as the multipart parser and crypto support where appropriate. Preserve compression negotiation and streaming flush semantics; native compression defaults are not automatically the same middleware policy.
+
+Acceptance: feature-by-feature compatibility cases derived from the reference adapter's documented external behavior, including multipart shapes, ETags, cache validators, traversal/symlink protection, proxy trust, and persistent compression contexts.
+
+### 6. TLS, platform gates, and release qualification
+
+Add TLS/mTLS certificate validation, client certificates, handshake bounds, and ALPN. Validate platforms individually rather than inferring Windows support from Jolt's portability. Run upstream/proven-client comparisons, sanitizers, allocation-failure coverage, and concurrency/lifecycle stress before declaring parity.
+
+HTTP/3 is a separate scope decision, not required for ring-chez feature parity.
+
+## Performance methodology
+
+Only the GitHub `Experiments` workflow runs performance measurements. It first runs correctness, explicit GC positive/negative controls, real native-reference comparisons, HTTP/2, and native sanitizer checks.
+
+Measure the external unmodified H2O static-file server versus a separate Jolt bridge process. Both return exactly `Hello, World!\n`. Validate status and body on every load-generator response. Save raw output, runner/CPU/kernel/compiler/runtime versions, commit, throughput, p50/p95/p99 latency, process thread count, and RSS. Use one H2O I/O thread, one j2o I/O thread plus one carrier, concurrency 1/16/64, warmup before every sample, three samples, and alternating server order.
+
+Interpret native H2O as a transport ceiling, not an equivalent Ring stack or proof of a production speed claim. Do not optimize by skipping validation, truncating binary data, disabling GC safety, weakening limits, or dropping lifecycle cleanup. Profile the measured bridge cost before considering batching, buffer reuse, fewer FFI crossings, or pinned buffers. Every optimization must preserve the same correctness gates.
+
+## Experiment limits, not public API promises
+
+The probe has a fixed loopback listener, a small request/body cap, one named carrier, limited Ring fields, only string/byte response bodies, a simple response queue, no streaming/TLS/WebSocket/middleware API, and forced shutdown. It does not yet propagate every native disconnect into fiber cancellation. Its native H2O build currently omits wslay and optional compression integration. These are explicit boundaries of a feasibility experiment, not a partial implementation advertised as production-ready.

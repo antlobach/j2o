@@ -1,0 +1,72 @@
+name: Experiments
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: experiments-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  correctness-and-performance:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      JOLT_VERSION: v0.8.27
+      JOLT_GC_STALL: '0.5'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install native toolchain and load generator
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang cmake pkg-config libssl-dev zlib1g-dev wrk curl nghttp2-client
+      - name: Install pinned Jolt with checksum verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="jolt-${JOLT_VERSION}-x86_64-linux"
+          base="https://github.com/jolt-lang/jolt/releases/download/${JOLT_VERSION}"
+          curl -fsSL -o "$RUNNER_TEMP/jolt.tar.gz" "$base/$name.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/jolt.sha256" "$base/$name.tar.gz.sha256"
+          read -r expected _ < "$RUNNER_TEMP/jolt.sha256"
+          actual="$(sha256sum "$RUNNER_TEMP/jolt.tar.gz")"
+          test "${actual%% *}" = "$expected"
+          tar -xzf "$RUNNER_TEMP/jolt.tar.gz" -C "$RUNNER_TEMP"
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "$RUNNER_TEMP/$name/jolt" "$HOME/.local/bin/jolt"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build bridge against external shared H2O and unmodified reference
+        run: bash experiments/build.sh
+      - name: Check dynamic H2O dependency
+        run: |
+          ldd .cache/libj2o_probe.so
+          ldd .cache/libj2o_probe.so | grep 'libh2o-evloop'
+          test ! -d vendor
+          test ! -d .cache/h2o
+      - name: Fiber scheduling, explicit offload, cancellation, and Vars
+        run: jolt -m j2o.experiments.fibers
+      - name: GC progress and deliberately unsafe negative control
+        run: |
+          jolt -m j2o.experiments.gc safe
+          jolt -m j2o.experiments.gc unsafe
+      - name: Native H2O differential and concurrent HTTP GC checks
+        run: jolt -m j2o.experiments.differential
+      - name: HTTP/2 against native reference
+        run: jolt -m j2o.experiments.http2
+      - name: Native address and undefined-behavior sanitizers
+        run: CC=clang bash experiments/native_safety.sh
+      - name: Runner-only performance comparison
+        run: jolt -m j2o.experiments.bench
+      - name: Save raw experiment artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: j2o-experiments-${{ github.sha }}
+          include-hidden-files: true
+          path: |
+            .cache/results/
+            .cache/reference.log
+          if-no-files-found: error

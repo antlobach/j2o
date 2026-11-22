@@ -41,6 +41,25 @@
                       :else nil))))
               forms)))
 
+(defn reference-signature [identifier seen]
+  (when (contains? seen identifier)
+    (throw (ex-info "Cyclic reference alias" {:var identifier :seen seen})))
+  (let [module (symbol (namespace identifier))
+        variable (ns-resolve module (symbol (name identifier)))
+        path (str (-> (str module) (str/replace "." "/") (str/replace "-" "_")) ".clj")
+        resource (io/resource path)]
+    (when-not resource (throw (ex-info "Reference source unavailable" {:var identifier :path path})))
+    (let [forms (source-forms resource)
+          direct (get (declarations forms) (symbol (name identifier)))]
+      (or direct
+          (let [form (first (filter #(and (seq? %) (= 'def (first %))
+                                         (= (symbol (name identifier)) (second %))) forms))
+                alias (when (symbol? (nth form 2 nil)) (ns-resolve module (nth form 2)))
+                metadata (when alias (meta alias))]
+            (when-not alias (throw (ex-info "No source arity for reference var" {:var identifier :metadata (meta variable)})))
+            (reference-signature (symbol (str (ns-name (:ns metadata))) (str (:name metadata)))
+                                 (conj seen identifier)))))))
+
 (defn check-reference! [root]
   (let [manifest (edn/read-string (slurp (str root "/test/compat/public-api.edn")))
         expected (:vars manifest)
@@ -71,7 +90,7 @@
               (when-not target (throw (ex-info "Alias target not found" {:var identifier :target (:target contract)})))
               (equal! [identifier :identity] true (identical? @target @variable))
               (equal! [identifier :arities] (normalize-signature contract)
-                      (normalize-signature (signature (:arglists (meta target))))))
+                      (normalize-signature (reference-signature (:target contract) #{}))))
             :ffi
             (do (equal! [identifier :kind] :ffi (:kind source))
                 (equal! [identifier :arities] (normalize-signature contract) (normalize-signature source)))
@@ -87,7 +106,20 @@
     (let [types (set (for [[module forms] modules, form forms
                           :when (and (seq? form) (= 'defrecord (first form)))]
                       (symbol (str module "." (second form)))))]
-      (equal! :record-type-set (set (keys (:types manifest))) types))
+      (equal! :record-type-set (set (keys (:types manifest))) types)
+      (doseq [[identifier contract] (:types manifest)]
+        (equal! [identifier :status] :supported (:status contract))
+        (equal! [identifier :representation] :opaque (:representation contract))
+        (when (str/blank? (:reason contract))
+          (throw (ex-info "Opaque type decision lacks a reason" {:type identifier})))))
+    (equal! :handle-contract-keys #{:socket :sockets} (set (keys (:handle-shape manifest))))
+    (let [socket (get-in manifest [:handle-shape :socket])
+          sockets (get-in manifest [:handle-shape :sockets])]
+      (equal! :socket-status :supported (:status socket))
+      (equal! :socket-representation :opaque-listener-token (:representation socket))
+      (equal! :sockets-status :internal-excluded (:status sockets))
+      (when (or (str/blank? (:excluded-meaning socket)) (str/blank? (:reason sockets)))
+        (throw (ex-info "Handle contract lacks its exclusion rationale" {}))))
     (let [reference (edn/read-string (slurp "deps.edn"))
           project (edn/read-string (slurp (str root "/deps.edn")))]
       (equal! :dependency-contract (:deps reference) (:deps project))

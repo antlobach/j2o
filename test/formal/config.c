@@ -1,6 +1,7 @@
 /* CBMC entry points include production code; no rewritten implementation. */
 #include "../../native/j2o_bridge.c"
 #include <assert.h>
+#include <stdarg.h>
 
 extern uint32_t nondet_u32(void);
 extern uint64_t nondet_u64(void);
@@ -15,6 +16,27 @@ size_t strnlen(const char *text, size_t bound)
     size_t length = 0;
     while (length < bound && text[length] != 0) ++length;
     return length;
+}
+
+/* The bundled vsnprintf model can omit the required trailing NUL. Model the
+ * sole formatter used by this translation unit exactly, with an assertion
+ * rejecting any future format change instead of silently generalizing it. */
+int snprintf(char *out, size_t capacity, const char *format, ...)
+{
+    assert(strcmp(format, "%llu") == 0);
+    va_list arguments;
+    va_start(arguments, format);
+    unsigned long long value = va_arg(arguments, unsigned long long);
+    va_end(arguments);
+    char reverse[20];
+    size_t length = 0;
+    do { reverse[length++] = (char)('0' + value % 10); value /= 10; } while (value != 0);
+    if (capacity != 0) {
+        size_t copied = length < capacity - 1 ? length : capacity - 1;
+        for (size_t i = 0; i < copied; ++i) out[i] = reverse[length - i - 1];
+        out[copied] = 0;
+    }
+    return (int)length;
 }
 
 static void terminated(const j2o_error *error)

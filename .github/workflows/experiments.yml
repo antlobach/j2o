@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     env:
-      JOLT_VERSION: v0.8.27
+      JOLT_VERSION: v0.8.28
       JOLT_GC_STALL: '0.5'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

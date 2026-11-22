@@ -17,7 +17,7 @@ This repository currently contains executable design experiments and an implemen
 Run the commands below in GitHub Actions, not on the development workstation. Builds, correctness suites, sanitizers, GC probes, stress, and performance workloads are remote-only for this project.
 
 
-Requires Jolt **v0.8.27**, Git, a C11 compiler, CMake, pkg-config, OpenSSL 3, zlib, and an HTTP/2-enabled curl. macOS uses Homebrew `openssl@3`; Linux uses the installed development libraries. `OPENSSL_ROOT_DIR` can override discovery.
+Requires Jolt **v0.8.28**, Git, a C11 compiler, CMake, pkg-config, OpenSSL 3, zlib, and an HTTP/2-enabled curl. macOS uses Homebrew `openssl@3`; Linux uses the installed development libraries. `OPENSSL_ROOT_DIR` can override discovery.
 
 ```sh
 bash experiments/build.sh

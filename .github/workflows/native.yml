@@ -37,7 +37,7 @@ jobs:
       J2O_SANITIZER: ${{ matrix.sanitizer }}
       H2O_SOURCE_DIR: ${{ github.workspace }}/../h2o-source
       H2O_BUILD_DIR: ${{ github.workspace }}/../h2o-build
-      JOLT_VERSION: v0.8.27
+      JOLT_VERSION: v0.8.28
       JOLT_GC_STALL: '0.5'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

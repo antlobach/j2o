@@ -1,5 +1,5 @@
 {:paths ["src" "resources" "experiments"]
- :jolt/min-version "0.8.27"
+ :jolt/min-version "0.8.28"
  :deps {jolt-lang/jolt-crypto {:git/url "https://github.com/jolt-lang/crypto"
                                :git/tag "v0.2.1" :git/sha "b9c64853243750ee65815144adfb69cc7ccacfe8"}
         jolt-lang/multipart {:git/url "https://github.com/jolt-lang/multipart"

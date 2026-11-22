@@ -150,6 +150,8 @@ static void timeout_and_concurrent_join(void)
 {
     j2o_config *config = configuration("127.0.0.1");
     j2o_server *server = start(config); j2o_error error;
+    /* Reject deadline arithmetic overflow without stopping or freeing the server. */
+    assert(j2o_server_join(server, UINT64_MAX, &error) == J2O_INVALID);
     assert(j2o_server_join(server, 0, &error) == J2O_OS && error.os_errno == ETIMEDOUT);
     assert(atomic_load(&server->state) == RUNNING);
     assert(fcntl(j2o_server_event_fd(server), F_GETFD) >= 0);

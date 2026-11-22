@@ -32,17 +32,32 @@
 
 (defn read-line! [process reader timeout-ms]
   ;; Jolt 0.8.27 process readers do not report BufferedReader.ready reliably.
-  ;; A timed future is joined after child termination before anyone reuses reader.
-  (let [task (future (.readLine reader))]
+  ;; A timed future is joined before reader reuse. On irrecoverable cleanup
+  ;; failure, the future retains reader ownership and closes it on late exit.
+  (let [state (atom :reading)
+        task (future
+               (try (.readLine reader)
+                    (finally
+                      (when-not (compare-and-set! state :reading :finished)
+                        (.close reader)))))]
     (try
       (let [line (deref task timeout-ms ::timeout)]
         (when (= ::timeout line)
           (throw (ex-info "Child protocol read exceeded deadline" {:timeout-ms timeout-ms})))
         line)
       (catch Throwable primary
-        (preserve! primary
-          #(do
-             (terminate! process)
-             (when (= ::timeout (try (deref task 2000 ::timeout) (catch Throwable _ ::finished)))
-               (throw (ex-info "Child protocol reader did not retire" {:pid (.pid process)})))))
-        (throw primary)))))
+        (let [errors (atom [])
+              _ (try (terminate! process) (catch Throwable error (swap! errors conj error)))
+              _ (try (deref task 2000 ::timeout)
+                     (catch Throwable error (swap! errors conj error)))
+              pending? (not (future-done? task))]
+          (when pending?
+            (swap! errors conj (ex-info "Child protocol reader did not retire" {:pid (.pid process)}))
+            (when-not (compare-and-set! state :reading :abandoned)
+              ;; The future finished between the timed join and ownership transfer.
+              (try (.close reader) (catch Throwable error (swap! errors conj error)))))
+          (when (seq @errors)
+            (throw (ex-info (ex-message primary)
+                            (assoc (or (ex-data primary) {}) :cleanup-errors @errors :reader-pending pending?)
+                            primary)))
+          (throw primary))))))

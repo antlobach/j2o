@@ -200,6 +200,19 @@
         (when (.isAlive process) (child/terminate! process))
         (.close reader)
         (.delete file))))
+  (let [process (.start (ProcessBuilder. ["sleep" "60"]))
+        reader (java.io.BufferedReader. (java.io.InputStreamReader. (.getInputStream process)))
+        terminate child/terminate!
+        failure (ex-info "injected termination error after reaping" {})]
+    (try
+      (let [caught (with-redefs [child/terminate! (fn [p] (terminate p) (throw failure))]
+                     (try (child/read-line! process reader 20) nil (catch Throwable t t)))]
+        (checks/check! :reader-join-runs-after-termination-error false (:reader-pending (ex-data caught)))
+        (checks/check! :reader-error-retains-timeout-cause 20 (:timeout-ms (ex-data (ex-cause caught))))
+        (checks/check! :reader-error-retains-termination-failure [failure] (:cleanup-errors (ex-data caught))))
+      (finally
+        (when (.isAlive process) (terminate process))
+        (.close reader))))
   (let [primary (ex-info "primary" {:kind :load})
         cleanup (ex-info "cleanup" {:kind :stop})
         caught (try (child/preserve! primary #(throw cleanup)) nil (catch Throwable t t))]

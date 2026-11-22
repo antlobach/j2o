@@ -118,10 +118,11 @@
               (attempt #(let [writer (java.io.OutputStreamWriter. (.getOutputStream process))]
                           (.write writer "stop\n") (.flush writer) (.close writer))))
             (attempt #(child/await! process 5000))
-            (when-let [reader (:reader @resources)]
-              (when-not (.isAlive process)
-                (attempt #(spit ".cache/results/j2o-server-shutdown.txt" (slurp reader))))
-              (attempt #(.close reader))))
+            (when (not (:reader-pending (ex-data @primary)))
+              (when-let [reader (:reader @resources)]
+                (when-not (.isAlive process)
+                  (attempt #(spit ".cache/results/j2o-server-shutdown.txt" (slurp reader))))
+                (attempt #(.close reader)))))
           (attempt #(differential/stop-reference! reference))
           (attempt #(shutdown-agents))
           (when (seq @errors)

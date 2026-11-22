@@ -42,14 +42,15 @@
       (attempt #(do (.write writer "stop\n") (.flush writer))))
     (attempt #(child/await! process 5000))
     (when-not (.isAlive process)
-      (attempt #(let [exit (.exitValue process)
-                      output (slurp reader)]
-                  (spit (str destination "-shutdown.txt") output)
+      (attempt #(let [exit (.exitValue process)]
+                  (when-not (:reader-pending (ex-data primary))
+                    (spit (str destination "-shutdown.txt") (slurp reader)))
                   (when-not (zero? exit)
-                    (throw (ex-info "Profiling child failed" {:exit exit :output output})))))
+                    (throw (ex-info "Profiling child failed" {:exit exit})))))
       (attempt #(when-not (empty? (slurp (str destination "-stderr.txt")))
                   (throw (ex-info "Profiling child wrote stderr" {:destination destination})))))
-    (doseq [resource [writer reader]] (attempt #(.close resource)))
+    (doseq [resource (if (:reader-pending (ex-data primary)) [writer] [writer reader])]
+      (attempt #(.close resource)))
     (when (seq @errors)
       ;; Jolt has no suppressed-exception mutation; preserve the original cause.
       (throw (ex-info (if primary (ex-message primary) "Profiling child cleanup failed")

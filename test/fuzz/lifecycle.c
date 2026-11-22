@@ -71,6 +71,21 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         atomic_store(&test_fail_at, 0);
         if (result != J2O_OK) { assert(server == NULL); no_resources(2); continue; }
         assert(server != NULL && j2o_server_event_fd(server) >= 0);
+        /* Exercise copied response commands, malformed header bytes and stale
+         * IDs against the real owner loop, including ownership on rejection. */
+        j2o_id id = {0, (uint32_t)data[0], data[1]};
+        size_t length = size < 128 ? size : 128;
+        j2o_response *response = j2o_response_create(&id, 100 + data[2], data, length, &error);
+        assert(response != NULL);
+        check_error(J2O_OK, &error);
+        size_t split = data[0] % (length + 1);
+        result = j2o_response_header(response, (const char *)data, split,
+                                     (const char *)data + split, length - split, &error);
+        check_error(result, &error);
+        assert(result == J2O_OK || result == J2O_INVALID || result == J2O_NOMEM);
+        result = j2o_response_submit(server, response, &error);
+        check_error(result, &error);
+        if (result != J2O_OK) j2o_response_release(response);
         /* Legal callers retain the handle; destruction is never raced with a call. */
         for (size_t i = 3; i < size && i < 35; ++i) {
             switch (data[i] % 4) {

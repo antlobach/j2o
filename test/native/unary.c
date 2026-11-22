@@ -117,6 +117,31 @@ static void http2_request(j2o_server *server)
     close(client);
 }
 
+static void http2_reset(j2o_server *server)
+{
+    int client = connect_to(j2o_server_port(server));
+    static const unsigned char request[] =
+        "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+        "\x00\x00\x00\x04\x00\x00\x00\x00\x00"
+        "\x00\x00\x11\x01\x05\x00\x00\x00\x01"
+        "\x82\x86\x84\x01\x0c" "example.test";
+    static const unsigned char reset[] = "\x00\x00\x04\x03\x00\x00\x00\x00\x01\x00\x00\x00\x08";
+    assert(write(client, request, sizeof(request) - 1) == (ssize_t)(sizeof(request) - 1));
+    j2o_event *event = next_event(server);
+    assert(j2o_event_kind(event) == 1);
+    j2o_id id, retired;
+    j2o_event_id(event, &id);
+    j2o_event_release(event);
+    assert(write(client, reset, sizeof(reset) - 1) == (ssize_t)(sizeof(reset) - 1));
+    event = next_event(server);
+    assert(j2o_event_kind(event) == 2);
+    j2o_event_id(event, &retired);
+    assert(retired.slot == id.slot && retired.generation == id.generation);
+    j2o_event_release(event);
+    send_response(server, id, 200, "late");
+    close(client);
+}
+
 int main(void)
 {
     j2o_error error;
@@ -179,6 +204,10 @@ int main(void)
     assert(j2o_event_kind(event) == 2);
     j2o_event_release(event);
     http2_request(server);
+    event = next_event(server);
+    assert(j2o_event_kind(event) == 2);
+    j2o_event_release(event);
+    http2_reset(server);
     assert(j2o_server_force_stop(server, &error) == J2O_OK);
     assert(j2o_server_join(server, 5000, &error) == J2O_OK);
     j2o_server_destroy(server);

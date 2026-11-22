@@ -34,6 +34,24 @@
         (wire/close! client)
         (adapter/stop-server server)))))
 
+(defn- live-handler [_] {:status 200 :body "before"})
+
+(defn- var-redefinition! []
+  (let [original @#'live-handler
+        server (adapter/run-server #'live-handler {:port 0 :worker-threads 1})
+        client (wire/connect (:port server))
+        request "GET / HTTP/1.1\r\nHost: example.test\r\n\r\n"]
+    (try
+      (wire/send! client request)
+      (equal! :var-before "before" (wire/text (wire/response! client)))
+      (alter-var-root #'live-handler (constantly (fn [_] {:status 200 :body "after"})))
+      (wire/send! client request)
+      (equal! :var-after "after" (wire/text (wire/response! client)))
+      (finally
+        (alter-var-root #'live-handler (constantly original))
+        (wire/close! client)
+        (adapter/stop-server server)))))
+
 (defn- direct-fiber! []
   (let [server (adapter/run-server (fn [_] {:status 200 :body (str (fib/in-fiber?))})
                                    {:port 0 :strategy :fibers :handler-on-fiber true})]
@@ -100,6 +118,7 @@
 
 (defn run-smoke! []
   (request-and-swap!)
+  (var-redefinition!)
   (direct-fiber!)
   (deadline!)
   (oversized-failure-hook!)

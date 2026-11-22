@@ -1,0 +1,354 @@
+-- allium: 3
+-- Internal lifecycle slice, not a public Ring server or an HTTP accept path.
+-- Runtime surfaces below report internal outcomes; they are NOT application ABI.
+-- Stock H2O may abort the host on allocation, loop/queue descriptor creation or
+-- internal notification failure. Those process exits are outside returned-error
+-- rollback guarantees. No fatal-handler interception is supplied.
+
+contract CallerLifetime {
+    @invariant ValidStorage
+        -- Fallible operations require caller-owned error storage. Configuration
+        -- mutation/destruction is not raced with start or other config calls.
+        -- Server destruction requires successful join and no concurrent or
+        -- future foreign call using that handle. This is a caller precondition,
+        -- not a native foreign-call registration API or a checked counter.
+    @invariant BorrowedDescriptor
+        -- The caller never closes or repurposes the event descriptor. It remains
+        -- borrowed and valid after stop/join, until server destruction.
+}
+
+contract ConfigurationValues {
+    @invariant NumericDomain
+        -- Unsigned key 2 is port 0..65535. Keys 4..14 accept uint64, with zero
+        -- allowed only for request/write timeout keys 12 and 13. Keys 4..10
+        -- must also fit size_t. Invalid setters preserve the previous settings.
+        -- Bool accepts only key 3 and integer 0/1; unavailable SO_REUSEPORT is
+        -- unsupported when true. String accepts only host key 1, nonempty bytes
+        -- without embedded NUL, with length != SIZE_MAX; the bytes are copied.
+    @invariant Defaults
+        -- host=127.0.0.1, port=3000, reuse-port=false, max-request=1048576,
+        -- max-header=8192, live-requests=1024, event-queue=2048,
+        -- response-queue=1024, queued-bytes=67108864, connections=4096,
+        -- keepalive=30000ms, request=60000ms, write=30000ms, handshake=10000ms.
+    @invariant SnapshotIndependence
+        -- Successful start snapshots every setting and host byte. The caller
+        -- may reuse, mutate or destroy its configuration after start returns.
+        -- Native code never retains a managed heap pointer or caller buffer.
+    @guidance
+        -- default_settings, numeric_valid, boolean_valid, host_valid and
+        -- updated_settings are pure domain predicates/value transformations
+        -- over these settings, not additional callable bridge operations.
+}
+
+contract ErrorAndABI {
+    @invariant ExactVersion
+        -- Development ABI 0x80000001 requires exact managed/native equality.
+        -- Result values are OK=0 INVALID=1 NOMEM=2 OS=3 UNSUPPORTED=4
+        -- QUEUE_FULL=5 STOPPED=6 STALE=7; the last three are reserved here.
+        -- Error size is 524 bytes; offsets are abi_size=0 result=4 os_errno=8
+        -- message=12 syscall=268 errno_name=300 key=332 given=396.
+    @invariant CopiedErrors
+        -- Success zeroes the complete error. Failure sets abi_size/result and
+        -- copies NUL-terminated fields into 256/32/32/64/128-byte buffers.
+        -- No field aliases TLS, native storage or caller input. Cleanup uses
+        -- separate storage, preserving the primary failure after later calls.
+    @invariant CollectSafe
+        -- Managed calls that allocate, lock, wait or copy variable-sized input
+        -- use the collect-safe transition. Scalar version/event-fd calls do not
+        -- allocate, wait, lock or call managed code.
+}
+
+entity NativeClient {}
+entity NativeRuntime {}
+
+entity Configuration {
+    status: available | disposed
+    settings: Any
+    transitions status {
+        available -> disposed
+        terminal: disposed
+    }
+}
+
+entity ServerAttempt {
+    status: starting | running | draining | forcing | joined | failed | destroyed
+    settings: Any
+    published: Boolean
+    owns_native_state: Boolean
+    listeners_bound: Boolean
+    loop_finished: Boolean
+    event_fd_valid: Boolean
+    transitions status {
+        starting -> running
+        starting -> failed
+        running -> draining
+        running -> forcing
+        draining -> forcing
+        draining -> joined
+        forcing -> joined
+        joined -> destroyed
+        terminal: failed, destroyed
+    }
+}
+
+entity JoinAttempt {
+    server: ServerAttempt
+    timeout_ms: Integer
+    status: waiting | completed | timed_out
+    transitions status {
+        waiting -> completed
+        waiting -> timed_out
+        terminal: completed, timed_out
+    }
+}
+
+rule CreateConfiguration {
+    when: ConfigCreate()
+    ensures: ConfigurationCreationRequested()
+}
+rule ConfigurationAllocated {
+    when: ConfigCreated(settings)
+    ensures: Configuration.created(status: available, settings: settings)
+}
+rule ConfigurationAllocationFailed {
+    when: ConfigAllocationFailed()
+    ensures: CopiedFailureReported()
+}
+rule SetUnsigned {
+    when: ConfigSetUnsigned(configuration, key, value)
+    requires: configuration.status = available
+    ensures:
+        if numeric_valid(key, value):
+            configuration.settings = updated_settings(configuration.settings, key, value)
+        else:
+            CopiedFailureReported()
+}
+rule SetBoolean {
+    when: ConfigSetBoolean(configuration, key, value)
+    requires: configuration.status = available
+    ensures:
+        if boolean_valid(key, value):
+            configuration.settings = updated_settings(configuration.settings, key, value)
+        else:
+            CopiedFailureReported()
+}
+rule SetHost {
+    when: ConfigSetString(configuration, key, bytes, length)
+    requires: configuration.status = available
+    ensures: HostCopyRequested(configuration, key, bytes, length)
+}
+rule HostCopied {
+    when: HostCopySucceeded(configuration, key, value)
+    requires: configuration.status = available
+    ensures: configuration.settings = updated_settings(configuration.settings, key, value)
+}
+rule HostRejectedOrAllocationFailed {
+    when: HostCopyFailed(configuration)
+    requires: configuration.status = available
+    ensures: CopiedFailureReported()
+}
+rule DestroyConfiguration {
+    when: ConfigDestroy(configuration)
+    requires: configuration.status = available
+    ensures: configuration.status = disposed
+}
+rule StartRequested {
+    when: ServerStart(configuration)
+    requires: configuration.status = available
+    ensures: ServerAttempt.created(status: starting, settings: configuration.settings,
+        published: false, owns_native_state: true, listeners_bound: false,
+        loop_finished: false, event_fd_valid: false)
+}
+rule StartupSucceeded {
+    when: StartupReady(server)
+    requires: server.status = starting
+    ensures: server.status = running
+    ensures: server.listeners_bound = true
+    ensures: server.event_fd_valid = true
+    ensures: server.published = true
+    @guidance
+        -- Ready means all resolved addresses were bound/listened/adopted, all
+        -- selected ports agree (including port 0), and H2O owner init completed.
+        -- Secondary ephemeral collisions retry the whole set, at most 32 tries.
+}
+rule StartupRolledBack {
+    when: StartupFailed(server)
+    requires: server.status = starting
+    ensures: server.status = failed
+    ensures: server.owns_native_state = false
+    ensures: server.loop_finished = true
+    ensures: CopiedFailureReported()
+    @guidance
+        -- Every returned failure joins any started owner and releases all
+        -- bridge-owned resources before returning NULL in the caller's output.
+        -- A failed attempt is an abstract history entry, never a client handle.
+}
+rule BeginDrain {
+    when: ServerBeginDrain(server)
+    requires: server.status = running
+    ensures: server.status = draining
+}
+rule RepeatDrain {
+    when: ServerBeginDrain(server)
+    requires: server.status in {draining, forcing, joined}
+    ensures: StopAcknowledged(server)
+}
+rule ForceRunning {
+    when: ServerForceStop(server)
+    requires: server.status = running
+    ensures: server.status = forcing
+}
+rule ForceDraining {
+    when: ServerForceStop(server)
+    requires: server.status = draining
+    ensures: server.status = forcing
+}
+rule RepeatForce {
+    when: ServerForceStop(server)
+    requires: server.status in {forcing, joined}
+    ensures: StopAcknowledged(server)
+}
+rule LoopFailed {
+    when: EventLoopFailed(server)
+    requires: server.status = running
+    ensures: server.status = forcing
+}
+rule LoopRetired {
+    when: OwnerFinished(server)
+    requires: server.status in {draining, forcing}
+    ensures: server.listeners_bound = false
+    ensures: server.loop_finished = true
+    @guidance
+        -- Listener close, H2O context/loop/config disposal and thread-local H2O
+        -- cleanup run on the owner. Join subsequently reaps that same thread.
+}
+rule JoinRequested {
+    when: ServerJoin(server, timeout_ms)
+    requires: server.published
+    requires: timeout_ms >= 0 and timeout_ms <= 9223372036854
+    ensures: JoinAttempt.created(server: server, timeout_ms: timeout_ms, status: waiting)
+}
+rule JoinTimedOut {
+    when: JoinDeadlineExpired(attempt)
+    requires: attempt.status = waiting
+    ensures: attempt.status = timed_out
+    ensures: JoinTimeoutReported(attempt.server)
+    @guidance
+        -- Returns OS/ETIMEDOUT without releasing state or borrowed descriptors.
+        -- A concurrent join in progress may also consume this call's deadline.
+}
+rule DrainingJoined {
+    when: JoinReady(attempt, server)
+    requires: attempt.server = server
+    requires: attempt.status = waiting
+    requires: server.status = draining
+    requires: server.loop_finished
+    ensures: server.status = joined
+    ensures: attempt.status = completed
+}
+rule ForcingJoined {
+    when: JoinReady(attempt, server)
+    requires: attempt.server = server
+    requires: attempt.status = waiting
+    requires: server.status = forcing
+    requires: server.loop_finished
+    ensures: server.status = joined
+    ensures: attempt.status = completed
+}
+rule RepeatedJoin {
+    when: JoinReady(attempt, server)
+    requires: attempt.server = server
+    requires: attempt.status = waiting
+    requires: server.status = joined
+    ensures: attempt.status = completed
+}
+rule DestroyJoined {
+    when: ServerDestroy(server)
+    requires: server.status = joined
+    requires: server.published
+    ensures: server.status = destroyed
+    ensures: server.owns_native_state = false
+    ensures: server.event_fd_valid = false
+    ensures: server.published = false
+}
+
+invariant PublishedOnlyAfterStartup {
+    for server in ServerAttempts:
+        server.status = running implies server.published and server.listeners_bound
+}
+invariant FailedStartHasNoHandle {
+    for server in ServerAttempts:
+        server.status = failed implies not server.published and not server.owns_native_state and not server.event_fd_valid
+}
+invariant RetainedUntilDestruction {
+    for server in ServerAttempts:
+        server.published implies server.owns_native_state and server.event_fd_valid
+}
+invariant NoEarlyDestruction {
+    for server in ServerAttempts:
+        server.status = destroyed implies server.loop_finished and not server.owns_native_state and not server.event_fd_valid
+}
+
+actor Caller { identified_by: NativeClient }
+actor OwnerRuntime { identified_by: NativeRuntime }
+
+surface NativeConfiguration {
+    facing _: Caller
+    context configuration: Configuration
+    provides:
+        ConfigCreate()
+        ConfigSetUnsigned(configuration, key, value) when configuration.status = available
+        ConfigSetBoolean(configuration, key, value) when configuration.status = available
+        ConfigSetString(configuration, key, bytes, length) when configuration.status = available
+        ConfigDestroy(configuration) when configuration.status = available
+        ServerStart(configuration) when configuration.status = available
+    contracts:
+        demands CallerLifetime
+        fulfils ConfigurationValues
+        fulfils ErrorAndABI
+}
+surface NativeLifecycle {
+    facing _: Caller
+    context server: ServerAttempt where published = true
+    provides:
+        ServerBeginDrain(server)
+        ServerForceStop(server)
+        ServerJoin(server, timeout_ms)
+        ServerDestroy(server) when server.status = joined
+    contracts:
+        demands CallerLifetime
+        fulfils ErrorAndABI
+    @guarantee BorrowedEventFD
+        -- j2o_server_event_fd returns only the borrowed descriptor, not internal
+        -- state, publication, selected port, ownership or an H2O socket layout.
+    @guarantee StopMonotonicity
+        -- Repeated drain/force/join succeeds on an already joined handle.
+        -- Stop writes retry EINTR and accept a full wake pipe as already awake.
+}
+surface InternalOwnerOutcomes {
+    facing _: OwnerRuntime
+    context server: ServerAttempt
+    provides:
+        StartupReady(server) when server.status = starting
+        StartupFailed(server) when server.status = starting
+        EventLoopFailed(server) when server.status = running
+        OwnerFinished(server) when server.status in {draining, forcing}
+    @guidance
+        -- Internal outcomes, not exported calls or caller-selected successes.
+}
+surface InternalConfigurationOutcomes {
+    facing _: OwnerRuntime
+    context configuration: Configuration
+    provides:
+        ConfigCreated(settings)
+        ConfigAllocationFailed()
+        HostCopySucceeded(configuration, key, value) when configuration.status = available
+        HostCopyFailed(configuration) when configuration.status = available
+}
+surface InternalJoinOutcomes {
+    facing _: OwnerRuntime
+    context attempt: JoinAttempt
+    provides:
+        JoinReady(attempt, attempt.server) when attempt.status = waiting
+        JoinDeadlineExpired(attempt) when attempt.status = waiting
+}

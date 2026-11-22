@@ -2,13 +2,15 @@
 
 ## Target contract
 
-An embedded H2O Ring adapter for Jolt, with synchronous one-argument handlers running on fibers. Application code explicitly offloads carrier-blocking work. Functions and Vars are accepted; resolving a Var happens once at the beginning of an invocation. Handler replacement affects subsequent invocations, including on existing connections. No async Ring callback arity, automatic handler executor, or direct-on-H2O handler mode.
+An embedded H2O adapter preserving the documented `ring-chez` application API on Jolt. Synchronous one-argument handlers run on a server-owned executor by default and in `:threads` mode; `:fibers` also uses that executor unless `:handler-on-fiber true` explicitly selects direct request-fiber execution. Functions and Vars are accepted; resolving a Var happens once at invocation. Handler replacement affects subsequent invocations, including on existing connections. No async Ring callback arity or direct-on-H2O handler execution.
 
 H2O remains an external, dynamically linked dependency. Do not copy H2O source or binaries into j2o, and do not statically bundle H2O into the bridge. The experiment builds an unmodified pinned revision in an external cache only to make its observations reproducible. Production packaging should consume a supported external H2O development/runtime package and verify the ABI at startup.
 
+Current qualification uses Jolt v0.8.28. Historical measurements below retain the runtime version actually measured. Stock H2O process-fatal allocation, loop/queue descriptor creation and internal-notification errors are an accepted boundary: returned bridge errors roll back owned resources, but host aborts are not recoverable results. No vendoring, private-layout access, custom H2O fork or upstream contribution is part of this plan.
+
 ## Evidence already obtained
 
-Environment: Jolt v0.8.27; external H2O revision `d3e43fcf00c3e6b17826b95d2d362d646185918a` (library 0.16); OpenSSL 3. Local execution is correctness/feasibility only. Performance measurements belong to GitHub runners.
+Historical prototype environment: Jolt v0.8.27; external H2O revision `d3e43fcf00c3e6b17826b95d2d362d646185918a` (library 0.16); OpenSSL 3. These observations predate the selected server-owned handler executor; direct-fiber design consequences below apply to that prototype. All new builds, runtime checks and performance measurements run on GitHub-hosted runners, not the workstation.
 
 | Experiment | Observed behavior | Design consequence |
 |---|---|---|
@@ -78,9 +80,9 @@ Acceptance: slow-reader backpressure, bounded memory, HTTP/2 stream isolation, s
 
 ### 4. Complete lifecycle and failure API
 
-Expose `j2o.adapter/run-server`, `stop-server`, `swap-handler!`, `swap-ws-handler!`, and `server-stats`. Functions and Vars have consistent semantics across the handler, WebSocket handler, guard, and failure callback.
+Expose `ring-chez.adapter/run-server`, `stop-server`, `swap-handler!`, `swap-ws-handler!`, and `server-stats`. Functions and Vars have consistent semantics across the handler, WebSocket handler, guard, and failure callback.
 
-Implement graceful draining and forced shutdown, not just the experiment's forced teardown. Distinguish application failures from server faults. Preserve useful default status behavior and failure metadata, but use j2o's namespace rather than compatibility aliases.
+Implement graceful draining and forced shutdown, not just the experiment's forced teardown. Distinguish application failures from server faults. Preserve documented status behavior and failure metadata. Freeze supported public vars, arities, constants and explicit transport-internal exclusions against the pinned reference manifest; do not add compatibility shims for obsolete native internals.
 
 For handler deadlines, use verified fiber-local kill plus an atomic terminal claim. Cancellation remains cooperative at runtime safe points: a fiber blocked in arbitrary foreign code cannot be forcibly unwound until control returns. A deadline does not promise to terminate application-owned offload threads.
 
@@ -102,7 +104,7 @@ HTTP/3 is a separate scope decision, not required for ring-chez feature parity.
 
 ## Performance methodology
 
-Only the GitHub `Experiments` workflow runs performance measurements. It first runs correctness, explicit GC positive/negative controls, real native-reference comparisons, HTTP/2, and native sanitizer checks.
+Performance measurements run only on GitHub-hosted runners and require an explicit manual dispatch at a stable milestone. PR/main updates run correctness and safety checks without benchmarks or performance profiles. Dispatch `Experiments` with `benchmarks=true` for the experimental bridge qualification; dispatch `Native H2O versus ring-chez` for the stock-server comparison. Correctness, explicit GC positive/negative controls, native-reference comparisons, HTTP/2, and sanitizer gates precede bridge measurements.
 
 Measure the external unmodified H2O static-file server versus a separate Jolt bridge process. Both return exactly `Hello, World!\n`. Validate status and body on every load-generator response. Save raw output, runner/CPU/kernel/compiler/runtime versions, commit, throughput, p50/p95/p99 latency, process thread count, and RSS. Use one H2O I/O thread, one j2o I/O thread plus one carrier, concurrency 1/16/64, warmup before every sample, three samples, and alternating server order.
 

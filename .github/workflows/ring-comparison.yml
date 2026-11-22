@@ -1,11 +1,6 @@
 name: Native H2O versus ring-chez
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'experiments/ring_comparison*'
-      - '.github/workflows/ring-comparison.yml'
   workflow_dispatch:
 
 permissions:
@@ -24,7 +19,7 @@ jobs:
       matrix:
         body_bytes: [13, 16384]
     env:
-      JOLT_VERSION: v0.8.27
+      JOLT_VERSION: v0.8.28
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install native tools and load generator

@@ -1,23 +1,33 @@
 # j2o
 
-A fiber-first Ring adapter for Jolt, using external H2O for HTTP transport.
+An H2O-backed Ring adapter under development for Jolt.
 
-This repository currently contains executable design experiments and an implementation plan, not a production adapter or a published public API. The experiments exercise real H2O connections and real Jolt fibers; there is no substitute HTTP server or simulated transport.
+The repository contains executable transport experiments and an internal native lifecycle ABI, not a production adapter or a published Ring API. The experiments exercise real H2O connections and real Jolt fibers; there is no substitute HTTP server or simulated transport.
 
 ## Constraints
 
-- Synchronous, one-argument Ring handlers run on Jolt fibers.
-- Applications explicitly offload carrier-blocking native calls; the adapter does not offload handlers automatically.
+- Target handler scheduling: a server-owned executor for the default and `:threads` modes, also used by `:fibers` unless `:handler-on-fiber true` explicitly selects direct request-fiber execution. The existing transport experiments use the earlier direct-fiber prototype.
+- Collect-safe FFI permits GC but still occupies the calling carrier. Adapter-owned blocking work must not run on request carriers.
 - Functions and Vars are supported. A Var is resolved at handler invocation, allowing live redefinition; already-running invocations keep their entry function.
 - H2O is an **external shared-library dependency**. Its source/build cache is outside this repository, and it is not statically bundled into the bridge.
 - Calls that can allocate, lock, copy variable amounts of data, or wait use collect-safe FFI transitions. C retains only native-owned buffers, never pointers into movable Jolt objects. Native H2O threads never call into Jolt.
 - Performance measurements run **only on GitHub runners**, against unmodified H2O from the same pinned revision.
 
+## Internal native lifecycle
+
+`native/j2o_bridge.h` defines exact-match development ABI `0x80000001`; it is not release ABI v1. `src/j2o/native.clj` checks the version before binding the remaining functions. This slice binds and adopts listeners but does **not** accept HTTP requests.
+
+Start copies configuration and publishes a handle only after all resolved listeners and the H2O owner thread are initialized. Returned failures leave no server handle and roll back bridge-controlled resources. Stock H2O's process-fatal allocation, descriptor-creation and internal-notification failures remain process-fatal; the bridge does not intercept `h2o_fatal` or promise recovery from a host abort.
+
+Errors are bounded caller-owned copies. A join timeout retains the server; successful join does not destroy it. The event descriptor is borrowed until destruction and must not be closed by callers. Destroy requires successful join and quiescent foreign callers.
+
+The `Native lifecycle` GitHub workflow builds external H2O and the bridge with matching ASan/UBSan/leak or separate TSan instrumentation. It runs startup rollback, concurrent/repeated lifecycle, real-join GC controls and stateful native fuzzing. CBMC checks production configuration/error functions with explicit libc models and bounded inputs; it does not prove H2O, OS behavior or lifecycle concurrency. Allium structural/process checks are specification evidence, not a proof of C implementation correctness.
+
 ## Reproduce correctness experiments
 Run the commands below in GitHub Actions, not on the development workstation. Builds, correctness suites, sanitizers, GC probes, stress, and performance workloads are remote-only for this project.
 
 
-Requires Jolt **v0.8.27**, Git, a C11 compiler, CMake, pkg-config, OpenSSL 3, zlib, and an HTTP/2-enabled curl. macOS uses Homebrew `openssl@3`; Linux uses the installed development libraries. `OPENSSL_ROOT_DIR` can override discovery.
+Requires Jolt **v0.8.28**, Git, a C11 compiler, CMake, pkg-config, OpenSSL 3, zlib, and an HTTP/2-enabled curl. macOS uses Homebrew `openssl@3`; Linux uses the installed development libraries. `OPENSSL_ROOT_DIR` can override discovery.
 
 ```sh
 bash experiments/build.sh
@@ -48,7 +58,7 @@ H2O's protocol behavior is the baseline; matching the older adapter's rejection 
 
 ## Performance
 
-The `Experiments` GitHub Actions workflow runs correctness gates first, then benchmarks unmodified H2O and the experimental Jolt bridge with validated identical response bytes. It saves environment metadata, raw wrk output, throughput, p50/p95/p99 latency, thread counts, and RSS. The benchmark refuses to run outside Linux GitHub Actions.
+PR and main-branch updates run correctness and safety checks, **not benchmarks**. Performance runs are manual-only at stable milestones: dispatch `Experiments` with `benchmarks=true` for bridge benchmarks/profiles, or dispatch `Native H2O versus ring-chez` for the direct stock-server comparison. The former runs correctness gates before measuring and saves environment metadata, raw wrk output, throughput, p50/p95/p99 latency, thread counts, and RSS. Performance workloads refuse to run outside Linux GitHub Actions.
 
 The native static-file server is a transport ceiling, not an equivalent Ring application. Shared-runner results characterize this experiment; they are not a production performance guarantee.
 

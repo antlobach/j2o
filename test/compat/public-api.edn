@@ -1,0 +1,150 @@
+{:reference {:repository "https://github.com/jolt-lang/ring-chez-adapter"
+             :revision "e37d52f92c1c50d0a9af360e1d994554ec48f202"}
+ :vars
+ {ring-chez.adapter/run-server {:status :supported :kind :function :arities [2]}
+  ring-chez.adapter/server-stats {:status :supported :kind :function :arities [1]}
+  ring-chez.adapter/stop-server {:status :supported :kind :function :arities [1 2]}
+  ring-chez.adapter/swap-handler! {:status :supported :kind :function :arities [2]}
+  ring-chez.adapter/swap-ws-handler! {:status :supported :kind :function :arities [2]}
+  ring-chez.cas/cas! {:status :supported :kind :function :arities [3]}
+  ring-chez.fault/fault-handler {:status :supported :kind :function :arities [0 1]}
+  ring-chez.http/connection-token? {:status :supported :kind :function :arities [2]}
+  ring-chez.http/framed-request->ring {:status :supported :kind :function :arities [3]}
+  ring-chez.http/head-malformed? {:status :supported :kind :function :arities [1]}
+  ring-chez.http/keep-alive? {:status :supported :kind :function :arities [1]}
+  ring-chez.http/no-bytes {:status :supported :kind :constant :value [] :representation :byte-array}
+  ring-chez.http/normalize-path {:status :supported :kind :function :arities [1]}
+  ring-chez.http/peer-gone {:status :internal-excluded :kind :constant :value :ring-chez.http/peer-gone :reason "Transport-internal socket exception marker."}
+  ring-chez.http/read-request {:status :internal-excluded :kind :function :arities [3 5] :reason "H2O owns transport parsing, socket writes and peer lifetime."}
+  ring-chez.http/request->ring {:status :supported :kind :function :arities [3]}
+  ring-chez.http/response->parts {:status :supported :kind :function :arities [1 2]}
+  ring-chez.http/send-all {:status :internal-excluded :kind :function :arities [2 3 4] :reason "H2O owns transport parsing, socket writes and peer lifetime."}
+  ring-chez.http/send-response {:status :internal-excluded :kind :function :arities [5] :reason "H2O owns transport parsing, socket writes and peer lifetime."}
+  ring-chez.http/send-window! {:status :internal-excluded :kind :function :arities [4] :reason "H2O owns transport parsing, socket writes and peer lifetime."}
+  ring-chez.middleware.compress/accepted-codings {:status :supported :kind :function :arities [1]}
+  ring-chez.middleware.compress/choose-coding {:status :supported :kind :function :arities [2]}
+  ring-chez.middleware.compress/compress-response {:status :supported :kind :function :arities [3]}
+  ring-chez.middleware.compress/default-compressible-types {:status :supported :kind :constant :value ["text/" "application/json" "application/javascript" "application/xml" "application/x-javascript" "application/edn" "application/ld+json" "image/svg+xml"]}
+  ring-chez.middleware.compress/default-encodings {:status :supported :kind :constant :value ["zstd" "gzip"]}
+  ring-chez.middleware.compress/default-min-size {:status :supported :kind :constant :value 1024}
+  ring-chez.middleware.compress/wrap-compress {:status :supported :kind :function :arities [1 2]}
+  ring-chez.middleware.gzip/default-compressible-types {:status :supported :kind :constant :value ["text/" "application/json" "application/javascript" "application/xml" "application/x-javascript" "application/edn" "application/ld+json" "image/svg+xml"]}
+  ring-chez.middleware.gzip/default-min-size {:status :supported :kind :constant :value 1024}
+  ring-chez.middleware.gzip/gzip-acceptable? {:status :supported :kind :function :arities [1]}
+  ring-chez.middleware.gzip/gzip-response {:status :supported :kind :function :arities [3]}
+  ring-chez.middleware.gzip/wrap-gzip {:status :supported :kind :function :arities [1 2]}
+  ring-chez.middleware.multipart/multipart-params-request {:status :supported :kind :function :arities [1 2]}
+  ring-chez.middleware.multipart/wrap-multipart-params {:status :supported :kind :function :arities [1 2]}
+  ring-chez.middleware.proxy/forwarded-remote-addr {:status :supported :kind :function :arities [2]}
+  ring-chez.middleware.proxy/nth-from-right {:status :supported :kind :function :arities [2]}
+  ring-chez.middleware.proxy/wrap-forwarded-remote-addr {:status :supported :kind :function :arities [1 2]}
+  ring-chez.middleware.static/default-mime-types {:status :supported :kind :constant :value {"html" "text/html; charset=utf-8" "htm" "text/html; charset=utf-8" "css" "text/css; charset=utf-8" "js" "application/javascript" "mjs" "application/javascript" "json" "application/json" "map" "application/json" "txt" "text/plain; charset=utf-8" "xml" "application/xml" "svg" "image/svg+xml" "png" "image/png" "jpg" "image/jpeg" "jpeg" "image/jpeg" "gif" "image/gif" "webp" "image/webp" "avif" "image/avif" "ico" "image/x-icon" "pdf" "application/pdf" "woff" "font/woff" "woff2" "font/woff2" "ttf" "font/ttf" "otf" "font/otf" "wasm" "application/wasm" "csv" "text/csv; charset=utf-8" "md" "text/markdown; charset=utf-8" "mp4" "video/mp4" "webm" "video/webm" "zip" "application/zip" "gz" "application/gzip"}}
+  ring-chez.middleware.static/file-response {:status :supported :kind :function :arities [2 3]}
+  ring-chez.middleware.static/new-cache {:status :supported :kind :function :arities [0]}
+  ring-chez.middleware.static/static-request {:status :supported :kind :function :arities [3]}
+  ring-chez.middleware.static/wrap-static {:status :supported :kind :function :arities [2 3]}
+  ring-chez.multipart.core/close-parser {:status :supported :kind :alias :arities [1 2] :target multipart.core/close-parser}
+  ring-chez.multipart.core/content-disposition-quote {:status :supported :kind :alias :arities [1] :target multipart.core/content-disposition-quote}
+  ring-chez.multipart.core/content-disposition-unquote {:status :supported :kind :alias :arities [1 2] :target multipart.core/content-disposition-unquote}
+  ring-chez.multipart.core/header-quote {:status :supported :kind :alias :arities [1] :target multipart.core/header-quote}
+  ring-chez.multipart.core/header-unquote {:status :supported :kind :alias :arities [1 2] :target multipart.core/header-unquote}
+  ring-chez.multipart.core/is-form-request? {:status :supported :kind :alias :arities [1] :target multipart.core/is-form-request?}
+  ring-chez.multipart.core/make-parser {:status :supported :kind :alias :variadic-min 1 :target multipart.core/make-parser}
+  ring-chez.multipart.core/multipart-error? {:status :supported :kind :alias :arities [1] :target multipart.core/multipart-error?}
+  ring-chez.multipart.core/parse-chunk {:status :supported :kind :alias :arities [2] :target multipart.core/parse-chunk}
+  ring-chez.multipart.core/parse-content-disposition {:status :supported :kind :alias :arities [1] :target multipart.core/parse-content-disposition}
+  ring-chez.multipart.core/parse-form-data {:status :supported :kind :alias :arities [1 2] :target multipart.core/parse-form-data}
+  ring-chez.multipart.core/parse-multipart {:status :supported :kind :alias :arities [2 3] :target multipart.core/parse-multipart}
+  ring-chez.multipart.core/parse-options-header {:status :supported :kind :alias :arities [1 3] :target multipart.core/parse-options-header}
+  ring-chez.multipart.core/parse-stream {:status :supported :kind :alias :arities [2 3] :target multipart.core/parse-stream}
+  ring-chez.multipart.core/parser-error? {:status :supported :kind :alias :arities [1] :target multipart.core/parser-error?}
+  ring-chez.multipart.core/parser-limit-reached? {:status :supported :kind :alias :arities [1] :target multipart.core/parser-limit-reached?}
+  ring-chez.multipart.core/parser-state-error? {:status :supported :kind :alias :arities [1] :target multipart.core/parser-state-error?}
+  ring-chez.multipart.core/strict-parser-error? {:status :supported :kind :alias :arities [1] :target multipart.core/strict-parser-error?}
+  ring-chez.socket/bufsize {:status :internal-excluded :kind :constant :value 65536 :reason "Raw socket buffer implementation detail."}
+  ring-chez.socket/give-recv-buffer! {:status :internal-excluded :kind :function :arities [1] :reason "H2O owns sockets; raw descriptor operations are not application compatibility APIs."}
+  ring-chez.socket/listen-sockets {:status :internal-excluded :kind :function :arities [2 3] :reason "H2O owns sockets; raw descriptor operations are not application compatibility APIs."}
+  ring-chez.socket/local-port {:status :internal-excluded :kind :function :arities [1] :reason "H2O owns sockets; raw descriptor operations are not application compatibility APIs."}
+  ring-chez.socket/peer-gone? {:status :internal-excluded :kind :function :arities [1] :reason "H2O owns sockets; raw descriptor operations are not application compatibility APIs."}
+  ring-chez.socket/peer-ip {:status :internal-excluded :kind :function :arities [1] :reason "H2O owns sockets; raw descriptor operations are not application compatibility APIs."}
+  ring-chez.socket/resolve-bind-sockaddrs {:status :internal-excluded :kind :function :arities [2] :reason "H2O owns sockets; raw descriptor operations are not application compatibility APIs."}
+  ring-chez.socket/set-rcvtimeo! {:status :internal-excluded :kind :function :arities [2] :reason "H2O owns sockets; raw descriptor operations are not application compatibility APIs."}
+  ring-chez.socket/set-sndtimeo! {:status :internal-excluded :kind :function :arities [2] :reason "H2O owns sockets; raw descriptor operations are not application compatibility APIs."}
+  ring-chez.socket/take-recv-buffer! {:status :internal-excluded :kind :function :arities [0] :reason "H2O owns sockets; raw descriptor operations are not application compatibility APIs."}
+  ring-chez.sse/event-response {:status :supported :kind :function :arities [1]}
+  ring-chez.sse/format-event {:status :supported :kind :function :arities [1]}
+  ring-chez.sse/send! {:status :supported :kind :function :arities [2]}
+  ring-chez.tls/c-BIO-ctrl {:status :internal-excluded :kind :ffi :arities [4] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-BIO-new {:status :internal-excluded :kind :ffi :arities [1] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-BIO-read {:status :internal-excluded :kind :ffi :arities [3] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-BIO-s-mem {:status :internal-excluded :kind :ffi :arities [0] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-BIO-write {:status :internal-excluded :kind :ffi :arities [3] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-ERR-clear-error {:status :internal-excluded :kind :ffi :arities [0] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-ERR-error-string-n {:status :internal-excluded :kind :ffi :arities [3] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-ERR-get-error {:status :internal-excluded :kind :ffi :arities [0] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-CTX-check-key {:status :internal-excluded :kind :ffi :arities [1] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-CTX-ctrl {:status :internal-excluded :kind :ffi :arities [4] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-CTX-free {:status :internal-excluded :kind :ffi :arities [1] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-CTX-get-verify-mode {:status :internal-excluded :kind :ffi :arities [1] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-CTX-load-verify-locations {:status :internal-excluded :kind :ffi :arities [3] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-CTX-new {:status :internal-excluded :kind :ffi :arities [1] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-CTX-set-client-CA-list {:status :internal-excluded :kind :ffi :arities [2] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-CTX-set-options {:status :internal-excluded :kind :ffi :arities [2] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-CTX-set-session-id-context {:status :internal-excluded :kind :ffi :arities [3] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-CTX-set-verify {:status :internal-excluded :kind :ffi :arities [3] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-CTX-use-chain {:status :internal-excluded :kind :ffi :arities [2] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-CTX-use-key {:status :internal-excluded :kind :ffi :arities [3] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-accept {:status :internal-excluded :kind :ffi :arities [1] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-free {:status :internal-excluded :kind :ffi :arities [1] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-get-error {:status :internal-excluded :kind :ffi :arities [2] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-get-verify-result {:status :internal-excluded :kind :ffi :arities [1] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-get1-peer-certificate {:status :internal-excluded :kind :ffi :arities [1] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-load-client-CA-file {:status :internal-excluded :kind :ffi :arities [1] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-new {:status :internal-excluded :kind :ffi :arities [1] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-peek {:status :internal-excluded :kind :ffi :arities [3] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-read {:status :internal-excluded :kind :ffi :arities [3] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-set-accept-state {:status :internal-excluded :kind :ffi :arities [1] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-set-bio {:status :internal-excluded :kind :ffi :arities [3] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-shutdown {:status :internal-excluded :kind :ffi :arities [1] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-SSL-write {:status :internal-excluded :kind :ffi :arities [3] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-TLS-server-method {:status :internal-excluded :kind :ffi :arities [0] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-X509-free {:status :internal-excluded :kind :ffi :arities [1] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/c-i2d-X509 {:status :internal-excluded :kind :ffi :arities [2] :reason "Native OpenSSL/codec handle operation owned by H2O."}
+  ring-chez.tls/free-context {:status :internal-excluded :kind :function :arities [1] :reason "Native TLS transport lifecycle owned by H2O."}
+  ring-chez.tls/make-context {:status :internal-excluded :kind :function :arities [1] :reason "Native TLS transport lifecycle owned by H2O."}
+  ring-chez.tls/serve {:status :internal-excluded :kind :function :arities [5] :reason "Native TLS transport lifecycle owned by H2O."}
+  ring-chez.websocket/->Session {:status :internal-excluded :kind :function :arities [3] :reason "Exposes the fd-backed reference representation; j2o sessions are opaque."}
+  ring-chez.websocket/accept-token {:status :supported :kind :function :arities [1]}
+  ring-chez.websocket/close! {:status :supported :kind :function :arities [1 2 3]}
+  ring-chez.websocket/decode-frame {:status :supported :kind :function :arities [4]}
+  ring-chez.websocket/encode-frame {:status :supported :kind :function :arities [2]}
+  ring-chez.websocket/make-session {:status :internal-excluded :kind :function :arities [1 2 3] :reason "Exposes the fd-backed reference representation; j2o sessions are opaque."}
+  ring-chez.websocket/map->Session {:status :internal-excluded :kind :function :arities [1] :reason "Exposes the fd-backed reference representation; j2o sessions are opaque."}
+  ring-chez.websocket/max-fragments {:status :supported :kind :constant :value 16384}
+  ring-chez.websocket/max-frame {:status :supported :kind :constant :value 1048576}
+  ring-chez.websocket/max-message {:status :supported :kind :constant :value 8388608}
+  ring-chez.websocket/recv! {:status :supported :kind :function :arities [1]}
+  ring-chez.websocket/send! {:status :supported :kind :function :arities [2]}
+  ring-chez.websocket/send-binary! {:status :supported :kind :function :arities [2]}
+  ring-chez.websocket/valid-client-key? {:status :supported :kind :function :arities [1]}
+  ring-chez.websocket/valid-utf8? {:status :supported :kind :function :arities [1]}
+  ring-chez.zlib/available? {:status :supported :kind :function :arities [0]}
+  ring-chez.zlib/deflate-chunk! {:status :supported :kind :function :arities [2]}
+  ring-chez.zlib/deflate-close! {:status :supported :kind :function :arities [1]}
+  ring-chez.zlib/deflate-finish! {:status :supported :kind :function :arities [1]}
+  ring-chez.zlib/deflater {:status :supported :kind :function :arities [0 1]}
+  ring-chez.zlib/gzip {:status :supported :kind :function :arities [1 2]}
+  ring-chez.zstd/available? {:status :supported :kind :function :arities [0]}
+  ring-chez.zstd/compress {:status :supported :kind :function :arities [1 2]}
+  ring-chez.zstd/compress-chunk! {:status :supported :kind :function :arities [2]}
+  ring-chez.zstd/compress-close! {:status :supported :kind :function :arities [1]}
+  ring-chez.zstd/compress-finish! {:status :supported :kind :function :arities [1]}
+  ring-chez.zstd/compressor {:status :supported :kind :function :arities [0 1]}
+  ring-chez.zstd/decompress {:status :supported :kind :function :arities [1]}
+  ring-chez.zstd/default-level {:status :supported :kind :constant :value 1}
+  ring-chez.zstd/default-window-log {:status :supported :kind :constant :value 19}}
+ :types {ring-chez.websocket.Session {:status :supported :representation :opaque
+                                    :reason "Application session abstraction; fd-backed constructors excluded."}}
+ :handle-shape {:sockets {:status :internal-excluded :reason "Reference listener descriptor vector is transport-internal."}
+                :socket {:status :supported :representation :opaque-listener-token
+                         :excluded-meaning "A reusable native listener fd"}}}

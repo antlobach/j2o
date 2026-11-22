@@ -237,6 +237,10 @@ j2o_result j2o_response_submit(j2o_server *server, j2o_response *response, j2o_e
     if (state != RUNNING && state != DRAINING) {
         pthread_mutex_unlock(&server->mutex); return fail(error, J2O_STOPPED, 0, NULL, NULL, "Server stopped", NULL, NULL);
     }
+    if (response->bytes > server->config.values[J2O_MAX_QUEUED_BYTES]) {
+        pthread_mutex_unlock(&server->mutex);
+        return invalid(error, "response", NULL, "Response exceeds queued-byte limit");
+    }
     if (server->response_count >= server->config.values[J2O_MAX_RESPONSE_QUEUE] ||
         response->bytes > server->config.values[J2O_MAX_QUEUED_BYTES] - server->response_bytes) {
         pthread_mutex_unlock(&server->mutex); return fail(error, J2O_QUEUE_FULL, 0, NULL, NULL, "Response queue full", NULL, NULL);

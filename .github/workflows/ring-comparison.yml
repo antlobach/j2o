@@ -22,10 +22,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        body-bytes: [13, 16384]
+        body_bytes: [13, 16384]
     env:
       JOLT_VERSION: v0.8.27
-      RING_REFERENCE_DIR: ${{ runner.temp }}/ring-chez-reference
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install native tools and load generator
@@ -47,6 +46,8 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Check out unmodified pinned ring-chez outside j2o
         run: |
+          export RING_REFERENCE_DIR="$RUNNER_TEMP/ring-chez-reference"
+          echo "RING_REFERENCE_DIR=$RING_REFERENCE_DIR" >> "$GITHUB_ENV"
           mkdir -p "$RING_REFERENCE_DIR"
           git -C "$RING_REFERENCE_DIR" init
           git -C "$RING_REFERENCE_DIR" remote add origin https://github.com/jolt-lang/ring-chez-adapter.git
@@ -55,18 +56,18 @@ jobs:
       - name: Build external release-mode stock H2O
         run: bash experiments/build.sh
       - name: Exercise every actual server and load-validation path
-        run: python3 -u experiments/ring_comparison.py --body-bytes ${{ matrix.body-bytes }} --smoke
+        run: python3 -u experiments/ring_comparison.py --body-bytes ${{ matrix.body_bytes }} --smoke
       - name: Five-round matched HTTP/1.1 comparison
         shell: bash
         run: |
           set -euo pipefail
-          python3 -u experiments/ring_comparison.py --body-bytes ${{ matrix.body-bytes }} | tee .cache/ring-comparison-${{ matrix.body-bytes }}-driver.log
-          cat .cache/ring-comparison-${{ matrix.body-bytes }}/report.md >> "$GITHUB_STEP_SUMMARY"
+          python3 -u experiments/ring_comparison.py --body-bytes ${{ matrix.body_bytes }} | tee .cache/ring-comparison-${{ matrix.body_bytes }}-driver.log
+          cat .cache/ring-comparison-${{ matrix.body_bytes }}/report.md >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve complete raw evidence even on failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: h2o-ring-chez-${{ matrix.body-bytes }}-${{ github.sha }}
+          name: h2o-ring-chez-${{ matrix.body_bytes }}-${{ github.sha }}
           include-hidden-files: true
           path: .cache/ring-comparison*
           if-no-files-found: warn

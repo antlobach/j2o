@@ -58,7 +58,7 @@ def running_server(variant, body_path, output, ring_source, server_cpus):
         config = output / "h2o.yml"
         threads = 1 if variant == "h2o-one" else len(server_cpus)
         config.write_text(f"listen:\n  host: 127.0.0.1\n  port: {port}\n"
-                          f"num-threads: {threads}\nfile.mime.setdefault: text/plain\n"
+                          f"num-threads: {threads}\nfile.mime.setdefaulttype: text/plain\n"
                           f"hosts:\n  default:\n    paths:\n      /:\n"
                           f"        file.dir: {json.dumps(str(body_path.parent))}\n")
         args = affinity + [Path(ROOT / ".cache/h2o-reference-path").read_text().strip(),
@@ -192,6 +192,23 @@ def paired_interval(ratios):
     return [quantile(estimates, .025), quantile(estimates, .975)]
 
 
+def cpu_partition():
+    groups = collections.defaultdict(list)
+    for cpu in sorted(os.sched_getaffinity(0)):
+        topology = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology")
+        identity = (int((topology / "physical_package_id").read_text()),
+                    int((topology / "core_id").read_text()))
+        groups[identity].append(cpu)
+    cores = sorted(groups)
+    if len(cores) < 2:
+        raise RuntimeError("Need at least two physical cores to isolate client and server, not SMT siblings")
+    split = max(1, len(cores) // 2)
+    client = [cpu for core in cores[:split] for cpu in groups[core]]
+    server = [cpu for core in cores[split:] for cpu in groups[core]]
+    return client, server, [{"package": package, "core": core, "logical_cpus": groups[package, core]}
+                            for package, core in cores]
+
+
 def report(rows, output, rounds, concurrencies):
     groups = collections.defaultdict(list)
     for row in rows:
@@ -206,13 +223,13 @@ def report(rows, output, rounds, concurrencies):
     lines = ["# Native H2O versus unmodified ring-chez", "",
              "HTTP/1.1 keep-alive; constant prebuilt response, no middleware/TLS/app work.",
              "Native H2O serves a warmed static file: a transport ceiling, not an equivalent Ring stack.",
-             "Both servers get the same CPU affinity; wrk uses disjoint CPUs. No j2o bridge is loaded.",
+             "Both servers get the same CPU affinity; client/server never share a physical core. No j2o bridge is loaded.",
              "Medians over fresh processes; CPU covers the observer-inclusive wrk process window.",
              "RSS high-water includes startup/warmup. Every completed response is status/body validated.",
              "Intervals are exhaustive paired bootstrap intervals of median round ratios, not production guarantees.", ""]
     for concurrency in concurrencies:
         lines += [f"## Concurrency {concurrency}", "",
-                  "| Server | req/s | p50 µs | p99 µs | Server CPU cores | Peak RSS MiB | Peak threads | Client busy |",
+                  "| Server | req/s | p50 µs | p99 µs | Server CPU equivalents | Peak RSS MiB | Peak threads | wrk-thread CPU occupancy |",
                   "|---|---:|---:|---:|---:|---:|---:|---:|"]
         native = {s["round"]: s for s in groups["h2o-cores", concurrency]}
         for variant in VARIANTS:
@@ -225,12 +242,21 @@ def report(rows, output, rounds, concurrencies):
                 ratios = [s["requests_per_second"] / native[s["round"]]["requests_per_second"]
                           for s in sorted(samples, key=lambda s: s["round"])]
                 summary.update(round_ratios_to_h2o_cores=ratios,
+                               median_paired_ratio=statistics.median(ratios),
+                               wins_vs_h2o_cores=sum(ratio > 1 for ratio in ratios),
                                paired_ratio_interval=paired_interval(ratios))
             summaries.append(summary)
             lines.append(f"| {variant} | {summary['requests_per_second']:,.0f} | {summary['p50_us']:.0f} | "
                          f"{summary['p99_us']:.0f} | {summary['server_cpu_cores']:.2f} | "
                          f"{summary['peak_rss_kib']/1024:.1f} | {summary['threads']:.0f} | "
                          f"{summary['client_capacity_fraction']:.0%} |")
+        lines += ["", "| Ring variant / native-all-CPUs | Median paired throughput ratio | 95% paired bootstrap interval | Ring wins |",
+                  "|---|---:|---:|---:|"]
+        for summary in summaries:
+            if summary["concurrency"] == concurrency and summary["variant"].startswith("ring-"):
+                low, high = summary["paired_ratio_interval"]
+                lines.append(f"| {summary['variant']} | {summary['median_paired_ratio']:.3f} | "
+                             f"[{low:.3f}, {high:.3f}] | {summary['wins_vs_h2o_cores']}/{rounds} |")
         lines.append("")
     saturated = [f"{s['variant']}/c{s['concurrency']}/r{s['round']}" for s in rows
                  if s["client_capacity_fraction"] >= .85]
@@ -239,8 +265,8 @@ def report(rows, output, rounds, concurrencies):
               "The direct-fiber variant is appropriate for this nonblocking handler, not arbitrary blocking application code.",
               "This does not measure HTTP/2, TLS, real middleware or the achievable performance of a complete H2O-backed Ring binding.",
               "GitHub hosted-runner noise and a loopback client remain limitations.",
-              ("Possible load-generator CPU saturation (≥85% of wrk thread capacity): " + ", ".join(saturated))
-              if saturated else "No window reached the 85% client CPU warning threshold.", ""]
+              ("Possible load-generator CPU saturation (≥85% wrk-thread CPU occupancy): " + ", ".join(saturated))
+              if saturated else "No window reached the 85% wrk-thread CPU occupancy warning threshold.", ""]
     (output / "summary.json").write_text(json.dumps(summaries, indent=2) + "\n")
     (output / "report.md").write_text("\n".join(lines))
     print("\n".join(lines), flush=True)
@@ -258,11 +284,7 @@ def main():
     if command("git", "rev-parse", "HEAD", cwd=ring_source) != RING_REVISION:
         raise RuntimeError("Wrong reference adapter revision")
     subprocess.run(["git", "diff", "--exit-code", "HEAD"], cwd=ring_source, check=True)
-    cpus = sorted(os.sched_getaffinity(0))
-    if len(cpus) < 2:
-        raise RuntimeError("Need disjoint load-generator/server CPUs")
-    split = max(1, len(cpus) // 2)
-    client_cpus, server_cpus = cpus[:split], cpus[split:]
+    client_cpus, server_cpus, topology = cpu_partition()
     output = ROOT / ".cache" / ("ring-comparison-smoke" if options.smoke else f"ring-comparison-{options.body_bytes}")
     output.mkdir(parents=True, exist_ok=False)
     body_path = output / "www/plaintext"
@@ -276,6 +298,8 @@ def main():
                    "h2o_version": command(Path(ROOT / ".cache/h2o-reference-path").read_text().strip(), "--version"),
                    "compiler": command("cc", "--version"),
                    "client_cpus": client_cpus, "server_cpus": server_cpus,
+                   "physical_core_topology": topology,
+                   "h2o_cores_io_threads": len(server_cpus),
                    "body_bytes": options.body_bytes, "rounds": rounds,
                    "concurrencies": concurrencies, "warmup_seconds": 1 if options.smoke else 2,
                    "measurement_seconds": 1 if options.smoke else 5,

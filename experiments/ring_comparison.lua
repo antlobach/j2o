@@ -1,4 +1,6 @@
 local workers = {}
+-- Ephemeral listening ports must not change measured HTTP request bytes.
+wrk.headers["Host"] = "benchmark.local"
 
 function setup(thread)
   table.insert(workers, thread)

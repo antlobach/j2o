@@ -288,6 +288,12 @@ static void process_responses(j2o_server *server)
                 request->res.content_length = response->status < 200 || response->status == 204 ? SIZE_MAX : response->length;
                 for (size_t i = 0; i < response->header_count; ++i) {
                     response_header *h = response->headers + i;
+                    if (request->version >= 0x200 &&
+                        (h2o_memis(h->name, h->name_len, H2O_STRLIT("connection")) ||
+                         h2o_memis(h->name, h->name_len, H2O_STRLIT("keep-alive")) ||
+                         h2o_memis(h->name, h->name_len, H2O_STRLIT("proxy-connection")) ||
+                         h2o_memis(h->name, h->name_len, H2O_STRLIT("upgrade")) ||
+                         h2o_memis(h->name, h->name_len, H2O_STRLIT("te")))) continue;
                     h2o_iovec_t name = h2o_strdup(&request->pool, h->name, h->name_len);
                     h2o_iovec_t value = h2o_strdup(&request->pool, h->value, h->value_len);
                     h2o_add_header_by_str(&request->pool, &request->res.headers, name.base, name.len, 1, NULL, value.base, value.len);

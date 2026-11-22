@@ -1,5 +1,6 @@
 (ns j2o.ring-smoke
-  (:require [j2o.experiments.wire :as wire]
+  (:require [clojure.string :as str]
+            [j2o.experiments.wire :as wire]
             [j2o.native :as native]
             [jolt.fibers :as fib]
             [jolt.scheme :as scheme]
@@ -174,6 +175,30 @@
         (wire/close! client)
         (adapter/stop-server server)))))
 
+(defn- http2-header-policy! []
+  (let [server (adapter/run-server
+                 (fn [request] {:status 200 :headers {"Connection" "close"
+                                                      "Keep-Alive" "timeout=5"
+                                                      "X-Safe" "ok"}
+                                :body (:protocol request)})
+                 {:port 0 :worker-threads 1})]
+    (try
+      (let [process (.start (ProcessBuilder.
+                              ["/usr/bin/curl" "--http2-prior-knowledge" "--fail"
+                               "--silent" "--show-error" "--max-time" "5" "--dump-header" "-"
+                               (str "http://127.0.0.1:" (:port server) "/")]))
+            output (slurp (.getInputStream process))
+            error (slurp (.getErrorStream process))
+            exit (.waitFor process)
+            normalized (str/lower-case output)]
+        (when-not (zero? exit)
+          (throw (ex-info "HTTP/2 client rejected response" {:exit exit :error error})))
+        (equal! :http2-handler-protocol true (str/ends-with? output "HTTP/2"))
+        (equal! :http2-safe-header true (str/includes? normalized "x-safe: ok"))
+        (equal! :http2-no-connection-header false (str/includes? normalized "\nconnection:"))
+        (equal! :http2-no-keep-alive-header false (str/includes? normalized "\nkeep-alive:")))
+      (finally (adapter/stop-server server)))))
+
 (defn run-smoke! []
   (request-and-swap!)
   (var-redefinition!)
@@ -183,6 +208,7 @@
   (oversized-failure-hook!)
   (failure-and-byte-budget!)
   (unsafe-response-header!)
+  (http2-header-policy!)
   (gc-request-body!)
   (graceful-drain!)
   (println "all passed: Ring HTTP request mapping, handler swap, executor and deadline"))

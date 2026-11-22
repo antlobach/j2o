@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -119,7 +120,7 @@ struct j2o_response {
     struct j2o_response *next;
     j2o_id id;
     int status;
-    size_t length, header_count, bytes;
+    size_t length, header_count, header_capacity, bytes;
     response_header *headers;
     char body[];
 };
@@ -439,7 +440,10 @@ static void *server_loop(void *data)
     h2o_context_dispose(&server->context);
     h2o_evloop_destroy(loop);
     h2o_config_dispose(&server->h2o_config);
-    h2o_cleanup_thread(0, NULL);
+    /* h2o_cleanup_thread(0) is gated by its periodic deadline after traffic. */
+    h2o_buffer_clear_recycle(1);
+    h2o_socket_clear_recycle(1);
+    h2o_mem_clear_recycle(&h2o_mem_pool_allocator, 1);
     pthread_mutex_lock(&server->mutex);
     server->loop_done = 1;
     pthread_cond_broadcast(&server->changed);

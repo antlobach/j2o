@@ -171,16 +171,14 @@ j2o_response *j2o_response_create(const j2o_id *id, int status, const void *body
     }
     j2o_response *response = allocate(sizeof(*response) + length);
     if (response == NULL) { no_memory(error); return NULL; }
-    response->id = *id; response->status = status; response->length = length; response->bytes = length;
+    response->id = *id; response->status = status; response->length = length; response->bytes = sizeof(*response) + length;
     if (length != 0) memcpy(response->body, body, length);
     return response;
 }
 void j2o_response_release(j2o_response *response)
 {
     if (response == NULL) return;
-    for (size_t i = 0; i < response->header_count; ++i) {
-        deallocate(response->headers[i].name); deallocate(response->headers[i].value);
-    }
+    for (size_t i = 0; i < response->header_count; ++i) deallocate(response->headers[i].name);
     deallocate(response->headers); deallocate(response);
 }
 j2o_result j2o_response_header(j2o_response *response, const char *name, size_t name_len,
@@ -188,22 +186,45 @@ j2o_result j2o_response_header(j2o_response *response, const char *name, size_t 
 {
     if (error == NULL) return J2O_INVALID;
     success(error);
-    if (response == NULL || name == NULL || value == NULL || name_len == 0 || name_len == SIZE_MAX ||
-        value_len == SIZE_MAX || memchr(name, '\r', name_len) || memchr(name, '\n', name_len) ||
-        memchr(name, 0, name_len) || memchr(value, '\r', value_len) || memchr(value, '\n', value_len) ||
-        memchr(value, 0, value_len) || response->header_count >= SIZE_MAX / sizeof(response_header) - 1 ||
-        name_len > SIZE_MAX - value_len || response->bytes > SIZE_MAX - name_len - value_len)
+    if (response == NULL || name == NULL || value == NULL || name_len == 0 ||
+        value_len > SIZE_MAX - 2 || name_len > SIZE_MAX - value_len - 2 || memchr(value, '\r', value_len) ||
+        memchr(value, '\n', value_len) || memchr(value, 0, value_len))
         return invalid(error, "header", NULL, "Invalid response header");
-    size_t count = response->header_count;
-    response_header *headers = allocate((count + 1) * sizeof(*headers));
-    char *n = allocate(name_len + 1), *v = allocate(value_len + 1);
-    if (headers == NULL || n == NULL || v == NULL) { deallocate(headers); deallocate(n); deallocate(v); return no_memory(error); }
-    if (count != 0) memcpy(headers, response->headers, count * sizeof(*headers));
-    memcpy(n, name, name_len); n[name_len] = 0;
+    for (size_t i = 0; i < name_len; ++i) {
+        unsigned char c = (unsigned char)name[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || (c != 0 && strchr("!#$%&'*+-.^_`|~", c) != NULL)))
+            return invalid(error, "header", NULL, "Invalid response header name");
+    }
+    if ((name_len == 14 && strncasecmp(name, "content-length", 14) == 0) ||
+        (name_len == 17 && strncasecmp(name, "transfer-encoding", 17) == 0)) return J2O_OK;
+    size_t count = response->header_count, capacity = response->header_capacity;
+    size_t growth = 0;
+    if (count == capacity) {
+        if (capacity > SIZE_MAX / 2 / sizeof(response_header)) return no_memory(error);
+        size_t next = capacity == 0 ? 4 : capacity * 2;
+        growth = (next - capacity) * sizeof(response_header);
+        capacity = next;
+    }
+    size_t storage = name_len + value_len + 2;
+    if (growth > SIZE_MAX - storage || response->bytes > SIZE_MAX - storage - growth) return no_memory(error);
+    char *n = allocate(storage);
+    if (n == NULL) return no_memory(error);
+    if (growth != 0) {
+        response_header *headers = allocate(capacity * sizeof(*headers));
+        if (headers == NULL) { deallocate(n); return no_memory(error); }
+        if (count != 0) memcpy(headers, response->headers, count * sizeof(*headers));
+        deallocate(response->headers);
+        response->headers = headers; response->header_capacity = capacity;
+    }
+    for (size_t i = 0; i < name_len; ++i)
+        n[i] = name[i] >= 'A' && name[i] <= 'Z' ? (char)(name[i] + ('a' - 'A')) : name[i];
+    n[name_len] = 0;
+    char *v = n + name_len + 1;
     memcpy(v, value, value_len); v[value_len] = 0;
-    headers[count] = (response_header){n, name_len, v, value_len};
-    deallocate(response->headers); response->headers = headers; response->header_count = count + 1;
-    response->bytes += name_len + value_len;
+    response->headers[count] = (response_header){n, name_len, v, value_len};
+    response->header_count = count + 1;
+    response->bytes += storage + growth;
     return J2O_OK;
 }
 j2o_result j2o_response_submit(j2o_server *server, j2o_response *response, j2o_error *error)
@@ -251,7 +272,9 @@ static void process_responses(j2o_server *server)
                 request->res.content_length = response->length;
                 for (size_t i = 0; i < response->header_count; ++i) {
                     response_header *h = response->headers + i;
-                    h2o_add_header_by_str(&request->pool, &request->res.headers, h->name, h->name_len, 1, NULL, h->value, h->value_len);
+                    h2o_iovec_t name = h2o_strdup(&request->pool, h->name, h->name_len);
+                    h2o_iovec_t value = h2o_strdup(&request->pool, h->value, h->value_len);
+                    h2o_add_header_by_str(&request->pool, &request->res.headers, name.base, name.len, 1, NULL, value.base, value.len);
                 }
                 h2o_send_inline(request, response->body, response->length);
             }

@@ -63,7 +63,7 @@
   ring-chez.multipart.core/strict-parser-error? {:status :supported :kind :alias :arities [1] :target multipart.core/strict-parser-error?}
   ring-chez.socket/bufsize {:status :internal-excluded :kind :constant :value 65536 :reason "Raw socket buffer implementation detail."}
   ring-chez.socket/give-recv-buffer! {:status :internal-excluded :kind :function :arities [1] :reason "H2O owns sockets; raw descriptor operations are not application compatibility APIs."}
-  ring-chez.socket/listen-sockets {:status :internal-excluded :kind :function :arities [3] :reason "H2O owns sockets; raw descriptor operations are not application compatibility APIs."}
+  ring-chez.socket/listen-sockets {:status :internal-excluded :kind :function :arities [2 3] :reason "H2O owns sockets; raw descriptor operations are not application compatibility APIs."}
   ring-chez.socket/local-port {:status :internal-excluded :kind :function :arities [1] :reason "H2O owns sockets; raw descriptor operations are not application compatibility APIs."}
   ring-chez.socket/peer-gone? {:status :internal-excluded :kind :function :arities [1] :reason "H2O owns sockets; raw descriptor operations are not application compatibility APIs."}
   ring-chez.socket/peer-ip {:status :internal-excluded :kind :function :arities [1] :reason "H2O owns sockets; raw descriptor operations are not application compatibility APIs."}

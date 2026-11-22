@@ -4,10 +4,14 @@
             [clojure.java.io :as io]
             [clojure.string :as str]))
 
+(def ^:dynamic *mismatches* nil)
+
 (defn equal! [label expected actual]
   (when-not (= expected actual)
-    (throw (ex-info (str "Reference contract mismatch: " label)
-                    {:expected expected :actual actual}))))
+    (let [failure {:contract label :expected expected :actual actual}]
+      (if *mismatches*
+        (do (prn {:mismatch failure}) (swap! *mismatches* conj failure))
+        (throw (ex-info (str "Reference contract mismatch: " label) failure))))))
 
 (defn source-forms [file]
   (with-open [reader (java.io.PushbackReader. (io/reader file))]
@@ -61,6 +65,7 @@
                                  (conj seen identifier)))))))
 
 (defn check-reference! [root]
+  (binding [*mismatches* (atom [])]
   (let [manifest (edn/read-string (slurp (str root "/test/compat/public-api.edn")))
         expected (:vars manifest)
         files (filter #(and (.isFile %) (str/ends-with? (.getName %) ".clj"))
@@ -124,5 +129,7 @@
           project (edn/read-string (slurp (str root "/deps.edn")))]
       (equal! :dependency-contract (:deps reference) (:deps project))
       (equal! :optional-native-contract (:jolt/native reference) (:jolt/native project)))
+    (when (seq @*mismatches*)
+      (throw (ex-info "Reference compatibility manifest mismatches" {:mismatches @*mismatches*})))
     (prn {:scenario :pinned-reference-public-api :vars (count expected)
-          :decisions (frequencies (map :status (vals expected))) :status :passed})))
+          :decisions (frequencies (map :status (vals expected))) :status :passed}))))

@@ -18,6 +18,15 @@ size_t strnlen(const char *text, size_t bound)
     return length;
 }
 
+/* Standard byte search, also absent from the pinned CBMC libc bodies. */
+void *memchr(const void *buffer, int byte, size_t length)
+{
+    const unsigned char *bytes = buffer;
+    for (size_t i = 0; i < length; ++i)
+        if (bytes[i] == (unsigned char)byte) return (void *)(bytes + i);
+    return NULL;
+}
+
 /* The bundled vsnprintf model can omit the required trailing NUL. Model the
  * sole formatter used by this translation unit exactly, with an assertion
  * rejecting any future format change instead of silently generalizing it. */

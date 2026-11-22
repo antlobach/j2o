@@ -140,3 +140,34 @@ jobs:
           include-hidden-files: true
           path: .cache/formal/
           if-no-files-found: warn
+
+  specification:
+    name: Allium lifecycle structure
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install checksum-pinned Allium 3.6.1
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/allium.tar.gz" https://github.com/juxt/allium-tools/releases/download/v3.6.1/allium-x86_64-unknown-linux-gnu.tar.gz
+          echo "e00c99ae234b10207719257a70e7c2dcad73060864468cd293fb7ad40524e970  $RUNNER_TEMP/allium.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf "$RUNNER_TEMP/allium.tar.gz" -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Check, analyse and derive lifecycle obligations
+        run: |
+          set -euo pipefail
+          mkdir -p .cache/allium
+          allium --version
+          for command in check analyse plan model; do
+            allium "$command" spec/native-lifecycle.allium | tee ".cache/allium/$command.json"
+          done
+      - name: Save specification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: allium-${{ github.sha }}
+          include-hidden-files: true
+          path: .cache/allium/
+          if-no-files-found: error

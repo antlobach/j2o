@@ -125,9 +125,12 @@
       (do (native-interrupt-ingress native)
           (async/close! (:packets receiver)))
       (poller/cancel! fd))
-    (when (and dispatch (= ::timeout (fib/join dispatch 3000 ::timeout)))
-      (throw (ex-info "Dispatcher did not stop; retaining native state" {})))
-    (let [receiver-error
+    (let [dispatch-result (when dispatch
+                            (try {:value (fib/join dispatch 3000 ::timeout)}
+                                 (catch Throwable error {:error error})))
+          _ (when (= ::timeout (:value dispatch-result))
+              (throw (ex-info "Dispatcher did not stop; retaining native state" {})))
+          receiver-error
           (when receiver
             (let [[result channel] (async/alts!! [(:done receiver) (async/timeout 3000)])]
               (when-not (= channel (:done receiver))
@@ -147,7 +150,13 @@
         (poller/forget! fd)
         (native-destroy native)
         (when pool (fib/shutdown! pool))
-        (when receiver-error (throw receiver-error))
+        (when receiver-error
+          (if-let [secondary (:error dispatch-result)]
+            (throw (ex-info (ex-message receiver-error)
+                            (assoc (or (ex-data receiver-error) {}) :cleanup-errors [secondary])
+                            receiver-error))
+            (throw receiver-error)))
+        (when-let [error (:error dispatch-result)] (throw error))
         result))))
 
 (defn start!

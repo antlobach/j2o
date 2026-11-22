@@ -469,7 +469,7 @@ uint64_t j2o_probe_profile_identity(probe_server *server, size_t index, unsigned
     profile_trace *trace = state->records + index;
     uint32_t seen = atomic_load_explicit(&trace->seen, memory_order_acquire);
     /* The first stage publishes the immutable ID; never read unpublished data. */
-    return field == 1 ? seen : (seen == 0 ? 0 : trace->data[0]);
+    return field == 1 ? seen : ((seen & (UINT32_C(1) << P_ARRIVAL)) == 0 ? 0 : trace->data[0]);
 }
 int j2o_probe_profile_copy(probe_server *server, size_t index, uint64_t *out, size_t words)
 {

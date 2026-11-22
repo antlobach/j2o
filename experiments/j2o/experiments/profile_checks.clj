@@ -148,6 +148,29 @@
         (checks/check! :preparation-failure-leaves-no-native-packets 0
                        (:live-packets (bridge/stop! server)))))))
 
+(defn failed-dispatch-cleanup! []
+  (let [destroy bridge/native-destroy
+        destroyed (atom false)
+        failure (ex-info "injected dispatcher failure" {})]
+    (with-redefs [bridge/take-request (fn [& _] (throw failure))
+                  bridge/native-destroy (fn [native] (destroy native) (reset! destroyed true))]
+      (let [server (bridge/start! #'checks/live-handler)]
+        (checks/check! :dispatcher-failure-is-observed failure
+                       (try (fib/join (:dispatch server) 3000 ::timeout)
+                            (catch Throwable t t)))
+        (checks/check! :stop-preserves-dispatcher-failure failure
+                       (try (bridge/stop! server) nil (catch Throwable t t)))
+        (checks/check! :failed-dispatch-still-releases-native-state true @destroyed)))))
+
+(defn failed-ingress-cleanup! []
+  (let [failure (ex-info "injected native ingress failure" {})]
+    (with-redefs [bridge/native-await (fn [_] (throw failure))]
+      (let [server (bridge/start! #'checks/live-handler {:ingress :waiter})]
+        (try (fib/join (:dispatch server) 3000 ::timeout) (catch Throwable _ nil))
+        (let [caught (try (bridge/stop! server) nil (catch Throwable t t))]
+          (checks/check! :ingress-root-failure-survives-dispatch-error failure (ex-cause caught))
+          (checks/check! :derived-dispatch-error-is-retained 1 (count (:cleanup-errors (ex-data caught)))))))))
+
 (defn report-integrity! []
   (let [base {:requests 10 :requests-per-second 10 :p50-us 1 :p95-us 2 :p99-us 3
               :mismatches 0 :failures 0 :admitted 10 :answered 10 :stale 0
@@ -176,6 +199,8 @@
     (timed-stop-accounting!)
     (startup-rollback!)
     (preparation-failure!)
+    (failed-dispatch-cleanup!)
+    (failed-ingress-cleanup!)
     (report-integrity!)
     (doseq [mode [:timings :allocations]]
       (bounded! mode)

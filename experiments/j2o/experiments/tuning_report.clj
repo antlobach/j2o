@@ -142,7 +142,7 @@
    [:handler :handler-start :handler-return]
    [:response-validation-encoding :handler-return :response-encoded]
    [:output-ffi-marshalling :response-encoded :native-submit-enter]
-   [:native-command-copy :native-submit-enter :response-queued]
+   [:response-prepare-to-submit :native-submit-enter :response-queued]
    [:egress-handoff :response-queued :response-received]
    [:h2o-send-call :response-received :native-send-return]])
 

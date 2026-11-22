@@ -15,7 +15,7 @@ extern "C" {
 #endif
 
 /* Development revisions require an exact managed/native match. Not release ABI v1. */
-#define J2O_ABI_VERSION UINT32_C(0x80000001)
+#define J2O_ABI_VERSION UINT32_C(0x80000002)
 
 typedef enum {
     J2O_OK = 0, J2O_INVALID = 1, J2O_NOMEM = 2, J2O_OS = 3,
@@ -77,6 +77,24 @@ J2O_API void j2o_config_destroy(j2o_config *config);
 J2O_API j2o_result j2o_server_start(const j2o_config *config, j2o_server **server, j2o_error *error);
 /* Borrowed descriptor: valid until destroy. Never close it in managed code. */
 J2O_API int j2o_server_event_fd(j2o_server *server);
+/* Request fields are borrowed from the event until release. Header indexes
+ * enumerate pairs; field IDs 1..5 are method, raw target, body, authority and
+ * peer address. Events and response commands own their bytes, never Jolt data. */
+J2O_API unsigned j2o_server_port(j2o_server *server);
+J2O_API j2o_result j2o_event_take(j2o_server *server, j2o_event **event, j2o_error *error);
+J2O_API unsigned j2o_event_kind(const j2o_event *event);
+J2O_API void j2o_event_id(const j2o_event *event, j2o_id *id);
+J2O_API int j2o_event_version(const j2o_event *event);
+J2O_API size_t j2o_event_headers(const j2o_event *event);
+J2O_API const char *j2o_event_field(const j2o_event *event, unsigned field, size_t index, size_t *length);
+J2O_API void j2o_event_release(j2o_event *event);
+/* Response submission consumes the command only on J2O_OK. Header names and
+ * values are copied; headers may be added only before submission. */
+J2O_API j2o_response *j2o_response_create(const j2o_id *id, int status, const void *body, size_t length, j2o_error *error);
+J2O_API j2o_result j2o_response_header(j2o_response *response, const char *name, size_t name_len,
+                                       const char *value, size_t value_len, j2o_error *error);
+J2O_API j2o_result j2o_response_submit(j2o_server *server, j2o_response *response, j2o_error *error);
+J2O_API void j2o_response_release(j2o_response *response);
 J2O_API j2o_result j2o_server_begin_drain(j2o_server *server, j2o_error *error);
 J2O_API j2o_result j2o_server_force_stop(j2o_server *server, j2o_error *error);
 /* A timeout returns J2O_OS/ETIMEDOUT and retains the complete server. */

@@ -42,7 +42,7 @@ contract ConfigurationValues {
 
 contract ErrorAndABI {
     @invariant ExactVersion
-        -- Development ABI 0x80000001 requires exact managed/native equality.
+        -- Development ABI 0x80000002 requires exact managed/native equality.
         -- Result values are OK=0 INVALID=1 NOMEM=2 OS=3 UNSUPPORTED=4
         -- QUEUE_FULL=5 STOPPED=6 STALE=7; the last three are reserved here.
         -- Error size is 524 bytes; offsets are abi_size=0 result=4 os_errno=8

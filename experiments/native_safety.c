@@ -174,6 +174,10 @@ int main(void)
         assert(j2o_probe_stat(server, 5) == 0);
         assert(j2o_probe_stat(server, 6) == 0);
         assert(j2o_probe_stat(server, 2) == 3);
+        response_message *unsubmitted = j2o_probe_response_create(1, 200, "stopped", 7, NULL);
+        assert(unsubmitted != NULL);
+        assert(j2o_probe_response_submit(server, unsubmitted) == -1);
+        j2o_probe_response_release(unsubmitted);
         if (round % 2 != 0) {
             uint64_t data[PROFILE_WORDS];
             assert(j2o_probe_profile_info(server, 1) == 2);

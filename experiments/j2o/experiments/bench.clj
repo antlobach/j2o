@@ -32,6 +32,8 @@
           output (slurp (.getInputStream process))
           exit (.waitFor process)
           fields (re-find #"J2O_RESULT requests=(\d+) duration_us=(\d+) p50_us=(\d+) p95_us=(\d+) p99_us=(\d+) mismatches=(\d+) failures=(\d+)" output)]
+        (spit (str ".cache/results/" (name label) "-c" concurrency "-r" round
+                   (when warmup? "-warmup") ".txt") output)
       (when-not (and (zero? exit) fields)
         (throw (ex-info "Load generator failed validation" {:exit exit :output output})))
       (let [[requests duration p50 p95 p99 mismatches failures] (mapv #(Long/parseLong %) (rest fields))
@@ -44,8 +46,6 @@
                                      :requests-per-second (/ (* 1000000.0 requests) duration)
                                      :p50-us p50 :p95-us p95 :p99-us p99
                                      :mismatches mismatches :failures failures})]
-        (spit (str ".cache/results/" (name label) "-c" concurrency "-r" round
-                   (when warmup? "-warmup") ".txt") output)
         result))))
 
 (defn -main [& _]

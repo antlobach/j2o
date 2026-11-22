@@ -2,7 +2,8 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [j2o.experiments.bench :as bench]))
+            [j2o.experiments.bench :as bench])
+  (:import [java.util.concurrent TimeUnit]))
 
 (defn command! [writer reader command expected]
   (.write writer (str command "\n")) (.flush writer)
@@ -34,6 +35,32 @@
      :client-stop-inflight-answers (- (:answered result) client-completed)
      :client-stop-inflight-stale (:stale result)}))
 
+(defn finish-process! [process writer reader destination primary]
+  (let [errors (atom [])
+        attempt (fn [f] (try (f) (catch Throwable t (swap! errors conj t) nil)))]
+    (when (.isAlive process)
+      (attempt #(do (.write writer "stop\n") (.flush writer))))
+    (when-not (attempt #(.waitFor process 5000 TimeUnit/MILLISECONDS))
+      (attempt #(.destroy process))
+      (when-not (attempt #(.waitFor process 2000 TimeUnit/MILLISECONDS))
+        (attempt #(.destroyForcibly process))
+        (when-not (attempt #(.waitFor process 2000 TimeUnit/MILLISECONDS))
+          (swap! errors conj (ex-info "Child did not exit after forced termination" {:destination destination})))))
+    (when-not (.isAlive process)
+      (attempt #(let [exit (.exitValue process)
+                      output (slurp reader)]
+                  (spit (str destination "-shutdown.txt") output)
+                  (when-not (zero? exit)
+                    (throw (ex-info "Profiling child failed" {:exit exit :output output})))))
+      (attempt #(when-not (empty? (slurp (str destination "-stderr.txt")))
+                  (throw (ex-info "Profiling child wrote stderr" {:destination destination})))))
+    (doseq [resource [writer reader]] (attempt #(.close resource)))
+    (when (seq @errors)
+      ;; Jolt has no suppressed-exception mutation; preserve the original cause.
+      (throw (ex-info (if primary (ex-message primary) "Profiling child cleanup failed")
+                      (assoc (or (ex-data primary) {}) :cleanup-errors @errors)
+                      (or primary (first @errors)))))))
+
 (defn run-mode! [mode round]
   (let [destination (str ".cache/results/profile-" (name mode) "-r" round)
         label (keyword (str "profile-" (name mode)))
@@ -41,7 +68,8 @@
         _ (.redirectError builder (io/file (str destination "-stderr.txt")))
         process (.start builder)
         reader (java.io.BufferedReader. (java.io.InputStreamReader. (.getInputStream process)))
-        writer (java.io.OutputStreamWriter. (.getOutputStream process))]
+        writer (java.io.OutputStreamWriter. (.getOutputStream process))
+        primary (atom nil)]
     (try
       (let [ready (.readLine reader)]
         (when-not (and ready (str/starts-with? ready "READY "))
@@ -50,9 +78,11 @@
               _ (bench/sample! label port (.pid process) 1 round true)
               _ (command! writer reader "calibrate" "CALIBRATED")
               _ (command! writer reader "begin" "BEGUN")
+              _ (when (= :cpu mode) (command! writer reader "start-cpu" "CPU-STARTED"))
               load (if (= :idle mode)
                      (do (Thread/sleep 3000) nil)
                      (bench/sample! label port (.pid process) 1 round false))]
+          (when (= :cpu mode) (command! writer reader "stop-cpu" "CPU-STOPPED"))
           (command! writer reader "end" "ENDED")
           (let [result (edn/read-string (slurp (str destination ".edn")))
                 accounting (validate-capture! load result)]
@@ -62,14 +92,8 @@
                   (throw (ex-info "CPU sampler produced no samples" {})))))
             (merge {:mode mode :round round :destination destination}
                    accounting load result))))
-      (finally
-        (when (.isAlive process)
-          (.write writer "stop\n") (.flush writer))
-        (let [exit (.waitFor process)
-              output (slurp reader)]
-          (spit (str destination "-shutdown.txt") output)
-          (when-not (zero? exit)
-            (throw (ex-info "Profiling server failed" {:mode mode :exit exit :output output}))))))))
+      (catch Throwable t (reset! primary t) (throw t))
+      (finally (finish-process! process writer reader destination @primary)))))
 
 (defn -main [& _]
   (when-not (and (= "true" (System/getenv "GITHUB_ACTIONS"))

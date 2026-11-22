@@ -5,6 +5,8 @@
             [j2o.experiments.profile-server :as server]
             [j2o.experiments.profile-run :as runner]
             [j2o.experiments.wire :as wire]
+            [j2o.experiments.tuning-report :as report]
+            [jolt.ffi :as ffi]
             [jolt.fibers :as fib]))
 
 (defn check-traces! [mode trace]
@@ -105,9 +107,76 @@
                      (try (runner/validate-capture! load invalid) false
                           (catch clojure.lang.ExceptionInfo _ true))))))
 
+(defn startup-rollback! []
+  (doseq [stage [:ingress :pool :profile :receiver :dispatch]]
+    (let [start bridge/native-start destroy bridge/native-destroy stop bridge/native-stop
+          native (atom nil) stopped (atom nil) destroyed (atom false)
+          failure (ex-info "injected startup failure" {:stage stage})
+          fail (fn [& _] (throw failure))
+          run #(bridge/start! #'checks/live-handler
+                              {:ingress :waiter :stage-profile {:mode :timings}})]
+      (with-redefs [bridge/native-start (fn [] (let [p (start)] (reset! native p) p))
+                    bridge/native-stop (fn [p] (stop p) (reset! stopped (bridge/native-stat p 5)))
+                    bridge/native-destroy (fn [p] (destroy p) (reset! destroyed true))]
+        (let [caught (try
+                       (case stage
+                         :ingress (with-redefs [bridge/native-ingress-mode fail] (run))
+                         :pool (with-redefs [fib/pool fail] (run))
+                         :profile (with-redefs [profiling/create! fail] (run))
+                         :receiver (with-redefs [bridge/start-ingress! fail] (run))
+                         :dispatch (with-redefs [fib/spawn fail] (run)))
+                       nil
+                       (catch Throwable t t))]
+          (checks/check! :startup-preserves-original-failure failure caught)
+          (checks/check! :startup-native-was-real false (ffi/null? @native))
+          (checks/check! :startup-releases-all-native-packets 0 @stopped)
+          (checks/check! :startup-destroys-after-worker-retirement true @destroyed))))))
+
+(defn preparation-failure! []
+  (let [prepare bridge/native-response-create
+        attempts (atom 0)
+        server (bridge/start! (fn [_] {:status 200 :body "success"}))]
+    (try
+      (with-redefs [bridge/native-response-create
+                    (fn [& args]
+                      (if (= 1 (swap! attempts inc)) 0 (apply prepare args)))]
+        (checks/check! :failed-preparation-does-not-claim-terminal 500
+                       (:status (wire/request! (:port server) "/"))))
+      (checks/check! :next-request-after-preparation-failure 200
+                     (:status (wire/request! (:port server) "/")))
+      (finally
+        (checks/check! :preparation-failure-leaves-no-native-packets 0
+                       (:live-packets (bridge/stop! server)))))))
+
+(defn report-integrity! []
+  (let [base {:requests 10 :requests-per-second 10 :p50-us 1 :p95-us 2 :p99-us 3
+              :mismatches 0 :failures 0 :admitted 10 :answered 10 :stale 0
+              :stats {:live-packets 0 :connections 0}}
+        rows (vec (concat
+                    (for [variant (conj report/variants :native) c [1 16 64] r (range 5)]
+                      (assoc base :phase :http :variant variant :mode :off :concurrency c :round r))
+                    (for [variant report/variants mode [:off :timings :allocations :cpu :idle] r (range 3)]
+                      (assoc base :phase :profile :variant variant :mode mode :concurrency 1 :round r))))]
+    (report/validate-rows! rows)
+    (doseq [[label invalid]
+            [[:report-rejects-missing-round (pop rows)]
+             [:report-rejects-duplicate-round (assoc rows 0 (nth rows 1))]
+             [:report-rejects-mismatch (assoc-in rows [0 :mismatches] 1)]
+             [:report-rejects-load-failure (assoc-in rows [0 :failures] 1)]
+             [:report-rejects-retained-packet (assoc-in rows [15 :stats :live-packets] 1)]]]
+      (checks/check! label true
+                     (try (report/validate-rows! invalid) false
+                          (catch clojure.lang.ExceptionInfo _ true))))
+    (let [interval (report/paired-bootstrap [1 1 1 1 1])]
+      (checks/check! :paired-bootstrap-exact-resamples 3125 (:resamples interval))
+      (checks/check! :paired-bootstrap-null-effect [1.0 1.0] [(:lower interval) (:upper interval)]))))
+
 (defn -main [& _]
   (try
     (timed-stop-accounting!)
+    (startup-rollback!)
+    (preparation-failure!)
+    (report-integrity!)
     (doseq [mode [:timings :allocations]]
       (bounded! mode)
       (concurrent-and-deadline! mode))

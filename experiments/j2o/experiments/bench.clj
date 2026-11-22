@@ -35,6 +35,10 @@
       (when-not (and (zero? exit) fields)
         (throw (ex-info "Load generator failed validation" {:exit exit :output output})))
       (let [[requests duration p50 p95 p99 mismatches failures] (mapv #(Long/parseLong %) (rest fields))
+            _ (when-not (and (pos? requests) (pos? duration) (zero? mismatches) (zero? failures))
+                (throw (ex-info "Load generator observed incorrect responses or transport failures"
+                                {:requests requests :duration-us duration :mismatches mismatches :failures failures
+                                 :output output})))
             result (merge snapshot {:server label :concurrency concurrency :round round
                                      :warmup warmup? :requests requests :duration-us duration
                                      :requests-per-second (/ (* 1000000.0 requests) duration)

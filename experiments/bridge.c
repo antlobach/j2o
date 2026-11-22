@@ -159,6 +159,75 @@ static int on_request(h2o_handler_t *handler, h2o_req_t *request)
     return 0;
 }
 
+static const char *status_reason(int status)
+{
+    switch (status) {
+    case 100: return "Continue";
+    case 101: return "Switching Protocols";
+    case 102: return "Processing";
+    case 103: return "Early Hints";
+    case 200: return "OK";
+    case 201: return "Created";
+    case 202: return "Accepted";
+    case 203: return "Non-Authoritative Information";
+    case 204: return "No Content";
+    case 205: return "Reset Content";
+    case 206: return "Partial Content";
+    case 207: return "Multi-Status";
+    case 208: return "Already Reported";
+    case 226: return "IM Used";
+    case 300: return "Multiple Choices";
+    case 301: return "Moved Permanently";
+    case 302: return "Found";
+    case 303: return "See Other";
+    case 304: return "Not Modified";
+    case 305: return "Use Proxy";
+    case 307: return "Temporary Redirect";
+    case 308: return "Permanent Redirect";
+    case 400: return "Bad Request";
+    case 401: return "Unauthorized";
+    case 402: return "Payment Required";
+    case 403: return "Forbidden";
+    case 404: return "Not Found";
+    case 405: return "Method Not Allowed";
+    case 406: return "Not Acceptable";
+    case 407: return "Proxy Authentication Required";
+    case 408: return "Request Timeout";
+    case 409: return "Conflict";
+    case 410: return "Gone";
+    case 411: return "Length Required";
+    case 412: return "Precondition Failed";
+    case 413: return "Content Too Large";
+    case 414: return "URI Too Long";
+    case 415: return "Unsupported Media Type";
+    case 416: return "Range Not Satisfiable";
+    case 417: return "Expectation Failed";
+    case 418: return "I'm a teapot";
+    case 421: return "Misdirected Request";
+    case 422: return "Unprocessable Content";
+    case 423: return "Locked";
+    case 424: return "Failed Dependency";
+    case 425: return "Too Early";
+    case 426: return "Upgrade Required";
+    case 428: return "Precondition Required";
+    case 429: return "Too Many Requests";
+    case 431: return "Request Header Fields Too Large";
+    case 451: return "Unavailable For Legal Reasons";
+    case 500: return "Internal Server Error";
+    case 501: return "Not Implemented";
+    case 502: return "Bad Gateway";
+    case 503: return "Service Unavailable";
+    case 504: return "Gateway Timeout";
+    case 505: return "HTTP Version Not Supported";
+    case 506: return "Variant Also Negotiates";
+    case 507: return "Insufficient Storage";
+    case 508: return "Loop Detected";
+    case 510: return "Not Extended";
+    case 511: return "Network Authentication Required";
+    default: return "Unknown";
+    }
+}
+
 static void on_messages(h2o_multithread_receiver_t *receiver, h2o_linklist_t *messages)
 {
     probe_server *server = H2O_STRUCT_FROM_MEMBER(probe_server, receiver, receiver);
@@ -177,7 +246,7 @@ static void on_messages(h2o_multithread_receiver_t *receiver, h2o_linklist_t *me
         }
         if (request != NULL) {
             request->res.status = message->status;
-            request->res.reason = message->status == 200 ? "OK" : "Service Unavailable";
+            request->res.reason = status_reason(message->status);
             request->res.content_length = message->len;
             h2o_add_header(&request->pool, &request->res.headers, H2O_TOKEN_CONTENT_TYPE,
                            NULL, H2O_STRLIT("application/octet-stream"));
@@ -452,10 +521,10 @@ uint64_t j2o_probe_scalar(uint64_t value) { return value + 1; }
 request_packet *j2o_probe_take(probe_server *server)
 {
     pthread_mutex_lock(&server->mutex);
-    char buffer[128];
+    char byte;
     ssize_t result;
-    do { result = read(server->notify[0], buffer, sizeof(buffer)); }
-    while (result > 0 || (result < 0 && errno == EINTR));
+    do { result = read(server->notify[0], &byte, 1); }
+    while (result < 0 && errno == EINTR);
     request_packet *packet = NULL;
     if (server->count != 0) {
         packet = server->queue[server->head];
@@ -483,22 +552,34 @@ void j2o_probe_release(probe_server *server, request_packet *packet)
     atomic_fetch_sub(&server->packets, 1);
 }
 
-int j2o_probe_respond(probe_server *server, uint64_t id, int status, const char *body, size_t len, profile_trace *trace)
+response_message *j2o_probe_response_create(uint64_t id, int status, const char *body, size_t len, profile_trace *trace)
 {
     profile_stamp(trace, P_SUBMIT_ENTER, 0, 0);
-    if (len > MAX_RESPONSE || status < 200 || status > 599 || atomic_load(&server->stopping)) return -1;
+    if (len > MAX_RESPONSE || status < 200 || status > 599 || (len != 0 && body == NULL)) return NULL;
     response_message *message = malloc(sizeof(*message) + len);
-    if (message == NULL) return -1;
+    if (message == NULL) return NULL;
     message->super.link = (h2o_linklist_t){0};
     message->id = id;
     message->status = status;
     message->len = len;
     message->trace = trace;
-    if (trace != NULL) trace->data[PROFILE_RESPONSE_BYTES] = sizeof(*message) + len;
     if (len != 0) memcpy(message->body, body, len);
-    profile_stamp(trace, P_RESPONSE_QUEUED, 0, 0);
+    return message;
+}
+
+/* Submit consumes only on success. Callers must join all producers before stop. */
+int j2o_probe_response_submit(probe_server *server, response_message *message)
+{
+    if (atomic_load(&server->stopping)) return -1;
+    if (message->trace != NULL) message->trace->data[PROFILE_RESPONSE_BYTES] = sizeof(*message) + message->len;
+    profile_stamp(message->trace, P_RESPONSE_QUEUED, 0, 0);
     h2o_multithread_send_message(&server->receiver, &message->super);
     return 0;
+}
+
+void j2o_probe_response_release(response_message *message)
+{
+    free(message);
 }
 
 uint64_t j2o_probe_stat(probe_server *server, int field)

@@ -9,8 +9,8 @@
 
 (def variants [:poller :waiter :poller-scratch :waiter-scratch])
 
-(defn run-case! [variant mode concurrency round]
-  (let [label (keyword (str "tuning-" (name variant) "-" (name mode)))
+(defn run-case! [variant mode concurrency round phase]
+  (let [label (keyword (str "tuning-" (name phase) "-" (name variant) "-" (name mode)))
         destination (str ".cache/results/" (name label) "-c" concurrency "-r" round)
         waiter? (contains? #{:waiter :waiter-scratch} variant)
         scratch? (contains? #{:poller-scratch :waiter-scratch} variant)
@@ -20,7 +20,8 @@
         _ (.redirectError builder (io/file (str destination "-stderr.txt")))
         process (.start builder)
         reader (java.io.BufferedReader. (java.io.InputStreamReader. (.getInputStream process)))
-        writer (java.io.OutputStreamWriter. (.getOutputStream process))]
+        writer (java.io.OutputStreamWriter. (.getOutputStream process))
+        primary (atom nil)]
     (try
       (let [ready (.readLine reader)]
         (when-not (and ready (str/starts-with? ready "READY "))
@@ -29,8 +30,10 @@
           (bench/sample! label port (.pid process) concurrency round true)
           (profiling/command! writer reader "calibrate" "CALIBRATED")
           (profiling/command! writer reader "begin" "BEGUN")
+          (when (= :cpu mode) (profiling/command! writer reader "start-cpu" "CPU-STARTED"))
           (let [load (if (= :idle mode) (do (Thread/sleep 3000) nil)
                        (bench/sample! label port (.pid process) concurrency round false))]
+            (when (= :cpu mode) (profiling/command! writer reader "stop-cpu" "CPU-STOPPED"))
             (profiling/command! writer reader "end" "ENDED")
             (let [result (edn/read-string (slurp (str destination ".edn")))
                   accounting (profiling/validate-capture! load result)]
@@ -41,23 +44,17 @@
                 (let [cpu (edn/read-string (slurp (str destination "-cpu.edn")))]
                   (when-not (pos? (reduce + 0 (map :samples (:counts cpu))))
                     (throw (ex-info "Tuning CPU sampler captured no work" {})))))
-              (merge load result accounting {:variant variant :mode mode :round round
+              (merge load result accounting {:variant variant :mode mode :round round :phase phase
                                              :concurrency concurrency :destination destination})))))
-      (finally
-        (when (.isAlive process) (.write writer "stop\n") (.flush writer))
-        (let [exit (.waitFor process) output (slurp reader)]
-          (spit (str destination "-shutdown.txt") output)
-          (when-not (zero? exit)
-            (throw (ex-info "Tuning server failed" {:variant variant :exit exit :output output})))
-          (when-not (empty? (slurp (str destination "-stderr.txt")))
-            (throw (ex-info "Tuning server wrote stderr" {:variant variant :destination destination}))))))))
+      (catch Throwable t (reset! primary t) (throw t))
+      (finally (profiling/finish-process! process writer reader destination @primary)))))
 
 (defn native-case! [concurrency round]
   (let [reference (checks/start-reference!)]
     (try
       (bench/sample! :tuning-native (:port reference) (.pid (:process reference)) concurrency round true)
       (assoc (bench/sample! :tuning-native (:port reference) (.pid (:process reference)) concurrency round false)
-             :variant :native :mode :off :interpretation :transport-ceiling-not-ring-equivalent)
+             :variant :native :mode :off :phase :http :interpretation :transport-ceiling-not-ring-equivalent)
       (finally (checks/stop-reference! reference)))))
 
 (defn -main [& _]
@@ -86,10 +83,11 @@
       (doseq [concurrency [1 16 64] round (range 5)
               variant (let [order (into [:native] variants)] (if (even? round) order (reverse order)))]
         (retain! (if (= :native variant) (native-case! concurrency round)
-                   (run-case! variant :off concurrency round))))
+                   (run-case! variant :off concurrency round :http))))
       (doseq [round (range 3)
               variant (if (even? round) variants (reverse variants))
-              mode (if (even? round) [:timings :allocations :cpu :idle] [:idle :cpu :allocations :timings])]
-        (retain! (run-case! variant mode 1 round)))
+              mode (if (even? round) [:off :timings :allocations :cpu :idle]
+                       [:idle :cpu :allocations :timings :off])]
+        (retain! (run-case! variant mode 1 round :profile)))
       (micro/-main)
       (finally (shutdown-agents)))))

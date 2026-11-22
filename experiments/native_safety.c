@@ -57,7 +57,50 @@ static int read_header(int fd)
     header[count] = 0;
     int status = 0;
     assert(sscanf(header, "HTTP/%*s %d", &status) == 1);
+    if (status == 201) assert(strncmp(header, "HTTP/1.1 201 Created\r\n", 22) == 0);
+    if (status == 500) assert(strncmp(header, "HTTP/1.1 500 Internal Server Error\r\n", 36) == 0);
+    if (status == 599) assert(strncmp(header, "HTTP/1.1 599 Unknown\r\n", 22) == 0);
     return status;
+}
+
+static void submit_response(probe_server *server, uint64_t id, int status,
+                            const char *body, size_t length, profile_trace *trace)
+{
+    response_message *message = j2o_probe_response_create(id, status, body, length, trace);
+    assert(message != NULL);
+    assert(j2o_probe_response_submit(server, message) == 0);
+}
+
+static void queued_readiness(void)
+{
+    probe_server *server = j2o_probe_start();
+    assert(server != NULL);
+    int clients[3];
+    const char *request = "GET /queued HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    for (size_t i = 0; i < 3; ++i) {
+        clients[i] = connect_client(server);
+        send_all(clients[i], request, strlen(request));
+    }
+    for (unsigned attempt = 0; j2o_probe_stat(server, 0) != 3; ++attempt) {
+        assert(attempt < 3000);
+        struct timespec pause = {0, 1000000};
+        nanosleep(&pause, NULL);
+    }
+    /* All producer writes precede these three independent readiness cycles. */
+    for (size_t i = 0; i < 3; ++i) {
+        request_packet *packet = take_packet(server);
+        submit_response(server, packet->id, 200, "", 0, NULL);
+        j2o_probe_release(server, packet);
+    }
+    struct pollfd fd = {j2o_probe_fd(server), POLLIN, 0};
+    assert(poll(&fd, 1, 0) == 0);
+    for (size_t i = 0; i < 3; ++i) {
+        assert(read_header(clients[i]) == 200);
+        close(clients[i]);
+    }
+    j2o_probe_stop(server);
+    assert(j2o_probe_stat(server, 5) == 0);
+    j2o_probe_destroy(server);
 }
 
 static void *idle_waiter(void *data)
@@ -68,6 +111,7 @@ static void *idle_waiter(void *data)
 
 int main(void)
 {
+    queued_readiness();
     unsigned char payload[MAX_BODY + 1], result[MAX_BODY];
     for (size_t i = 0; i < sizeof(payload); ++i) payload[i] = (unsigned char)i;
     for (int round = 0; round < 10; ++round) {
@@ -79,6 +123,7 @@ int main(void)
             assert(j2o_probe_profile_recording(server, 1) == 0);
         }
         const size_t lengths[] = {0, 1, MAX_BODY};
+        const int statuses[] = {201, 500, 599};
         for (size_t test = 0; test < sizeof(lengths) / sizeof(lengths[0]); ++test) {
             int client = connect_client(server);
             size_t length = lengths[test];
@@ -93,10 +138,10 @@ int main(void)
             assert(received == length);
             assert(memcmp(body, payload, length) == 0);
             uint64_t id = j2o_probe_id(packet);
-            assert(j2o_probe_respond(server, id, 200, NULL, MAX_RESPONSE + 1, NULL) == -1);
-            assert(j2o_probe_respond(server, id, 200, body, length, j2o_probe_profile_trace(packet)) == 0);
+            assert(j2o_probe_response_create(id, 200, NULL, MAX_RESPONSE + 1, NULL) == NULL);
+            submit_response(server, id, statuses[test], body, length, j2o_probe_profile_trace(packet));
             j2o_probe_release(server, packet);
-            assert(read_header(client) == 200);
+            assert(read_header(client) == statuses[test]);
             size_t offset = 0;
             while (offset < length) {
                 ssize_t count = recv(client, result + offset, length - offset, 0);
@@ -105,7 +150,7 @@ int main(void)
             }
             assert(memcmp(result, payload, length) == 0);
             close(client);
-            assert(j2o_probe_respond(server, id, 200, "late", 4, NULL) == 0);
+            submit_response(server, id, 200, "late", 4, NULL);
         }
         int oversized = connect_client(server);
         const char *header = "POST /echo HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 4097\r\n\r\n";

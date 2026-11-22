@@ -153,6 +153,34 @@
       (equal! :collection-progress true (pos? @collected))
       (finally (adapter/stop-server server)))))
 
+(defn- bounded-admission! []
+  (let [entered (promise) release (promise)
+        server (adapter/run-server (fn [_] (deliver entered true) @release {:status 200 :body "accepted"})
+                                   {:port 0 :worker-threads 1 :max-live-requests 2})
+        first-client (wire/connect (:port server))
+        second-client (wire/connect (:port server))
+        request "GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n"]
+    (try
+      (wire/send! first-client request)
+      (equal! :first-admitted true (deref entered 5000 false))
+      (wire/send! second-client request)
+      (let [until (+ (System/currentTimeMillis) 5000)]
+        (loop []
+          (when (and (< (:requests (adapter/server-stats server)) 2)
+                     (< (System/currentTimeMillis) until))
+            (Thread/sleep 2)
+            (recur))))
+      (equal! :two-admitted 2 (:requests (adapter/server-stats server)))
+      (equal! :overload-rejected 503 (:status (wire/request! (:port server) "/")))
+      (deliver release true)
+      (equal! :first-completes "accepted" (wire/text (wire/response! first-client)))
+      (equal! :second-completes "accepted" (wire/text (wire/response! second-client)))
+      (finally
+        (deliver release true)
+        (wire/close! first-client)
+        (wire/close! second-client)
+        (adapter/stop-server server)))))
+
 (defn- graceful-drain! []
   (let [entered (promise) release (promise)
         server (adapter/run-server (fn [_] (deliver entered true) @release {:status 200 :body "drained"})
@@ -210,5 +238,6 @@
   (unsafe-response-header!)
   (http2-header-policy!)
   (gc-request-body!)
+  (bounded-admission!)
   (graceful-drain!)
   (println "all passed: Ring HTTP request mapping, handler swap, executor and deadline"))

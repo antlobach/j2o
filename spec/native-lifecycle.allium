@@ -1,0 +1,274 @@
+-- allium: 3
+-- Scope: internal native lifecycle and caller-visible ownership contract.
+-- Includes atomic multi-address startup, startup failure, stop/join and teardown.
+-- Excludes request dispatch, streaming, TLS and WebSocket behaviour: separate slices.
+-- H2O allocation failures are process-fatal upstream, not recoverable startup errors.
+
+-- NativeCaller is an application-owned type placeholder, not an adapter entity.
+external entity NativeCaller {}
+
+entity ServerAttempt {
+    status: new | binding | running | draining | forcing | joined | failed | destroyed
+    required_addresses: Set<String>
+    bound_addresses: Set<String>
+    requested_port: Integer
+    selected_port: Integer
+    published: Boolean
+    owns_native_state: Boolean
+    config_copied: Boolean
+    loop_finished: Boolean
+    foreign_callers: Integer
+
+    transitions status {
+        new -> binding
+        new -> failed
+        binding -> running
+        binding -> failed
+        running -> draining
+        running -> forcing
+        draining -> forcing
+        draining -> joined
+        forcing -> joined
+        joined -> destroyed
+        failed -> destroyed
+        terminal: destroyed
+    }
+}
+
+rule StartupRequested {
+    when: StartRequested(addresses, port)
+    requires: port >= 0 and port <= 65535
+    ensures: ServerAttempt.created(
+        status: new,
+        required_addresses: addresses,
+        bound_addresses: {},
+        requested_port: port,
+        selected_port: 0,
+        published: false,
+        owns_native_state: true,
+        config_copied: false,
+        loop_finished: false,
+        foreign_callers: 0
+    )
+}
+
+rule BindingBegins {
+    when: BeginBinding(server)
+    requires: server.status = new
+    ensures: server.status = binding
+    ensures: server.config_copied = true
+}
+
+rule AddressBound {
+    when: BindAddress(server, address, port)
+    requires: server.status = binding
+    requires: address in server.required_addresses
+    requires: address not in server.bound_addresses
+    requires: port > 0 and port <= 65535
+    requires: server.selected_port = 0 or port = server.selected_port
+    requires: server.requested_port = 0 or port = server.requested_port
+    ensures: server.bound_addresses = server.bound_addresses + {address}
+    ensures: server.selected_port = port
+}
+
+rule EphemeralCollisionRetried {
+    when: RetryEphemeralBinding(server)
+    requires: server.status = binding
+    requires: server.requested_port = 0
+    ensures: server.bound_addresses = {}
+    ensures: server.selected_port = 0
+}
+
+rule StartupPublished {
+    when: PublishStartup(server)
+    requires: server.status = binding
+    requires: server.required_addresses.count > 0
+    requires: server.bound_addresses = server.required_addresses
+    requires: server.config_copied
+    requires: server.selected_port > 0
+    ensures: server.status = running
+    ensures: server.published = true
+}
+
+rule StartupFailedBeforeBinding {
+    when: FailStartup(server)
+    requires: server.status = new
+    ensures: server.status = failed
+    ensures: server.bound_addresses = {}
+    ensures: server.selected_port = 0
+    ensures: server.owns_native_state = false
+    ensures: server.config_copied = false
+    ensures: server.loop_finished = true
+    ensures: server.published = false
+}
+
+rule StartupFailedDuringBinding {
+    when: FailStartup(server)
+    requires: server.status = binding
+    ensures: server.status = failed
+    ensures: server.bound_addresses = {}
+    ensures: server.selected_port = 0
+    ensures: server.owns_native_state = false
+    ensures: server.config_copied = false
+    ensures: server.loop_finished = true
+    ensures: server.published = false
+}
+
+rule DrainRequested {
+    when: BeginDrain(server)
+    requires: server.status = running
+    ensures: server.status = draining
+}
+
+rule RunningForceRequested {
+    when: ForceStop(server)
+    requires: server.status = running
+    ensures: server.status = forcing
+}
+
+rule DrainingForceRequested {
+    when: ForceStop(server)
+    requires: server.status = draining
+    ensures: server.status = forcing
+}
+
+rule LoopFailed {
+    when: EventLoopFailed(server)
+    requires: server.status = running
+    ensures: server.status = forcing
+}
+
+rule ListenersRetired {
+    when: CloseListeners(server)
+    requires: server.status in {draining, forcing}
+    ensures: server.bound_addresses = {}
+}
+
+rule LoopFinished {
+    when: FinishLoop(server)
+    requires: server.status in {draining, forcing}
+    requires: server.bound_addresses.count = 0
+    ensures: server.loop_finished = true
+}
+
+rule JoinTimedOut {
+    when: JoinDeadlineExpired(server)
+    requires: server.status in {running, draining, forcing}
+    requires: not server.loop_finished
+    ensures: JoinTimeoutReported(server)
+    @guidance
+        -- A join timeout retains ownership; it must not destroy or close the handle.
+}
+
+rule DrainingJoinCompleted {
+    when: CompleteJoin(server)
+    requires: server.status = draining
+    requires: server.loop_finished
+    ensures: server.status = joined
+}
+
+rule ForcingJoinCompleted {
+    when: CompleteJoin(server)
+    requires: server.status = forcing
+    requires: server.loop_finished
+    ensures: server.status = joined
+}
+
+rule ForeignCallEntered {
+    when: EnterForeignCall(server)
+    requires: server.status in {running, draining, forcing, joined}
+    ensures: server.foreign_callers = server.foreign_callers + 1
+}
+
+rule ForeignCallRetired {
+    when: LeaveForeignCall(server)
+    requires: server.foreign_callers > 0
+    ensures: server.foreign_callers = server.foreign_callers - 1
+}
+
+rule RepeatedStopAcknowledged {
+    when: RepeatStop(server)
+    requires: server.status in {draining, forcing, joined}
+    ensures: StopAcknowledged(server)
+}
+
+rule JoinedServerDestroyed {
+    when: DestroyJoinedServer(server)
+    requires: server.status = joined
+    requires: server.foreign_callers = 0
+    ensures: server.status = destroyed
+    ensures: server.owns_native_state = false
+    ensures: server.config_copied = false
+    ensures: server.published = false
+}
+
+rule FailedAttemptRetired {
+    when: RetireFailedAttempt(server)
+    requires: server.status = failed
+    ensures: server.status = destroyed
+}
+
+invariant AtomicPublication {
+    for server in ServerAttempts:
+        server.status = running implies
+            server.published and server.bound_addresses = server.required_addresses
+}
+
+invariant NoOwnershipAfterFailureOrDestruction {
+    for server in ServerAttempts:
+        server.status in {failed, destroyed} implies
+            not server.owns_native_state and not server.config_copied and server.bound_addresses.count = 0
+}
+
+invariant NoEarlyDestruction {
+    for server in ServerAttempts:
+        server.status = destroyed implies server.loop_finished and server.foreign_callers = 0
+}
+
+invariant NativeStateRetainedUntilJoined {
+    for server in ServerAttempts:
+        server.status in {running, draining, forcing, joined} implies server.owns_native_state
+}
+
+surface NativeStartup {
+    facing _: NativeCaller
+    provides:
+        StartRequested(addresses, port)
+}
+
+surface NativeLifecycle {
+    facing _: NativeCaller
+    context server: ServerAttempt
+    exposes:
+        server.status
+        server.published
+        server.selected_port
+        server.owns_native_state
+    provides:
+        EnterForeignCall(server) when server.status in {running, draining, forcing, joined}
+        LeaveForeignCall(server) when server.foreign_callers > 0
+        BeginBinding(server) when server.status = new
+        BindAddress(server, address, port) when server.status = binding
+        RetryEphemeralBinding(server) when server.status = binding
+        PublishStartup(server) when server.status = binding
+        FailStartup(server) when server.status in {new, binding}
+        BeginDrain(server) when server.status = running
+        ForceStop(server) when server.status in {running, draining}
+        EventLoopFailed(server) when server.status = running
+        CloseListeners(server) when server.status in {draining, forcing}
+        FinishLoop(server) when server.status in {draining, forcing}
+        JoinDeadlineExpired(server) when server.status in {running, draining, forcing}
+        CompleteJoin(server) when server.status in {draining, forcing}
+        RepeatStop(server) when server.status in {draining, forcing, joined}
+        DestroyJoinedServer(server) when server.status = joined
+        RetireFailedAttempt(server) when server.status = failed
+    @guarantee CallerOwnedErrors
+        -- Each failed call copies its primary error into caller-owned bounded storage.
+        -- Cleanup cannot overwrite it; later calls and config destruction cannot invalidate it.
+    @guarantee NoNativeLeaks
+        -- Failed startup and destruction release all owned allocations and descriptors.
+        -- Successful join retires the owner thread and disposes H2O on that thread.
+        -- No managed heap pointer is retained by native code.
+    @guarantee CollectSafeWaits
+        -- Managed calls that allocate, lock or wait permit collection to progress.
+}

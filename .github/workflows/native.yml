@@ -1,0 +1,127 @@
+name: Native lifecycle
+
+on:
+  push:
+    branches: [main, feat/native-lifecycle]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Native / ${{ matrix.mode }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: normal
+            sanitizer: ''
+          - mode: address-undefined-leak
+            sanitizer: address,undefined
+          - mode: thread
+            sanitizer: thread
+          - mode: fuzz
+            sanitizer: fuzzer-no-link,address,undefined
+    env:
+      CC: clang
+      CXX: clang++
+      J2O_SANITIZER: ${{ matrix.sanitizer }}
+      H2O_SOURCE_DIR: ${{ runner.temp }}/h2o-source
+      H2O_BUILD_DIR: ${{ runner.temp }}/h2o-build
+      JOLT_VERSION: v0.8.27
+      JOLT_GC_STALL: '0.5'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y clang cmake pkg-config libssl-dev zlib1g-dev curl
+      - name: Build pinned external stock H2O with matching instrumentation
+        run: bash script/provision-ci-h2o.sh
+      - name: Confirm external library instrumentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          nm -D "$H2O_BUILD_DIR/libh2o-evloop.so" > "$RUNNER_TEMP/h2o-symbols.txt"
+          case '${{ matrix.mode }}' in
+            address-undefined-leak|fuzz) grep '__asan_' "$RUNNER_TEMP/h2o-symbols.txt"; grep '__ubsan_' "$RUNNER_TEMP/h2o-symbols.txt" ;;
+            thread) grep '__tsan_' "$RUNNER_TEMP/h2o-symbols.txt" ;;
+          esac
+      - name: ABI, transactional rollback, concurrent join and repeated lifecycle
+        if: matrix.mode != 'fuzz'
+        env:
+          J2O_LEAK_CHECK: ${{ matrix.mode == 'address-undefined-leak' && '1' || '0' }}
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: bash test/native/run.sh
+      - name: Stateful real-bridge fuzzing with instrumented H2O
+        if: matrix.mode == 'fuzz'
+        run: bash test/fuzz/run.sh
+      - name: Install pinned Jolt with checksum verification
+        if: matrix.mode == 'normal'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="jolt-${JOLT_VERSION}-x86_64-linux"
+          base="https://github.com/jolt-lang/jolt/releases/download/${JOLT_VERSION}"
+          curl -fsSL -o "$RUNNER_TEMP/jolt.tar.gz" "$base/$name.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/jolt.sha256" "$base/$name.tar.gz.sha256"
+          read -r expected _ < "$RUNNER_TEMP/jolt.sha256"
+          actual="$(sha256sum "$RUNNER_TEMP/jolt.tar.gz")"
+          test "${actual%% *}" = "$expected"
+          tar -xzf "$RUNNER_TEMP/jolt.tar.gz" -C "$RUNNER_TEMP"
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "$RUNNER_TEMP/$name/jolt" "$HOME/.local/bin/jolt"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Managed ABI and copied-error smoke
+        if: matrix.mode == 'normal'
+        run: jolt -M:ci
+      - name: Save qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-${{ matrix.mode }}-${{ github.sha }}
+          include-hidden-files: true
+          path: |
+            .cache/fuzz/
+            ${{ runner.temp }}/h2o-symbols.txt
+          if-no-files-found: warn
+
+  formal:
+    name: Bounded config and error checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      H2O_SOURCE_DIR: ${{ runner.temp }}/h2o-source
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install pinned CBMC
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/cbmc.deb" https://github.com/diffblue/cbmc/releases/download/cbmc-6.11.0/ubuntu-22.04-cbmc-6.11.0-Linux.deb
+          echo "de9fa1cc4cf51c493e708a1c7608b192ad4956717b684d9c4501e22fd22d88a0  $RUNNER_TEMP/cbmc.deb" | sha256sum -c -
+          sudo apt-get update
+          sudo apt-get install -y "$RUNNER_TEMP/cbmc.deb" libssl-dev zlib1g-dev
+      - name: Obtain pinned external H2O headers
+        run: |
+          git init "$H2O_SOURCE_DIR"
+          git -C "$H2O_SOURCE_DIR" remote add origin https://github.com/h2o/h2o.git
+          git -C "$H2O_SOURCE_DIR" fetch --depth 1 origin d3e43fcf00c3e6b17826b95d2d362d646185918a
+          git -C "$H2O_SOURCE_DIR" checkout --detach FETCH_HEAD
+          test "$(git -C "$H2O_SOURCE_DIR" rev-parse HEAD)" = d3e43fcf00c3e6b17826b95d2d362d646185918a
+      - name: Check production config and copied-error functions
+        run: bash test/formal/run.sh
+      - name: Save bounded verification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: formal-${{ github.sha }}
+          include-hidden-files: true
+          path: .cache/formal/
+          if-no-files-found: warn

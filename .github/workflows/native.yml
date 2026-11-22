@@ -35,8 +35,8 @@ jobs:
       CC: clang
       CXX: clang++
       J2O_SANITIZER: ${{ matrix.sanitizer }}
-      H2O_SOURCE_DIR: ${{ runner.temp }}/h2o-source
-      H2O_BUILD_DIR: ${{ runner.temp }}/h2o-build
+      H2O_SOURCE_DIR: ${{ github.workspace }}/../h2o-source
+      H2O_BUILD_DIR: ${{ github.workspace }}/../h2o-build
       JOLT_VERSION: v0.8.27
       JOLT_GC_STALL: '0.5'
     steps:
@@ -98,7 +98,7 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     env:
-      H2O_SOURCE_DIR: ${{ runner.temp }}/h2o-source
+      H2O_SOURCE_DIR: ${{ github.workspace }}/../h2o-source
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install pinned CBMC

@@ -40,6 +40,7 @@ typedef struct {
 typedef struct {
     h2o_multithread_message_t super;
     uint64_t id;
+    uint64_t preparation_enter_ns;
     size_t len;
     int status;
     profile_trace *trace;
@@ -59,8 +60,8 @@ typedef struct connection {
 struct probe_server {
     pthread_t thread;
     pthread_mutex_t mutex;
-    pthread_cond_t ready;
-    int started, error, notify[2], port;
+    pthread_cond_t ready, requests_ready;
+    int started, error, notify[2], port, ingress_mode, ingress_stopped;
     h2o_globalconf_t config;
     h2o_context_t context;
     h2o_accept_ctx_t accept;
@@ -151,9 +152,81 @@ static int on_request(h2o_handler_t *handler, h2o_req_t *request)
     atomic_fetch_add(&server->packets, 1);
     atomic_fetch_add(&server->admitted, 1);
     profile_stamp(trace, P_QUEUED, 0, 0);
-    notify_locked(server);
+    if (server->ingress_mode == 1)
+        pthread_cond_signal(&server->requests_ready);
+    else
+        notify_locked(server);
     pthread_mutex_unlock(&server->mutex);
     return 0;
+}
+
+static const char *status_reason(int status)
+{
+    switch (status) {
+    case 100: return "Continue";
+    case 101: return "Switching Protocols";
+    case 102: return "Processing";
+    case 103: return "Early Hints";
+    case 200: return "OK";
+    case 201: return "Created";
+    case 202: return "Accepted";
+    case 203: return "Non-Authoritative Information";
+    case 204: return "No Content";
+    case 205: return "Reset Content";
+    case 206: return "Partial Content";
+    case 207: return "Multi-Status";
+    case 208: return "Already Reported";
+    case 226: return "IM Used";
+    case 300: return "Multiple Choices";
+    case 301: return "Moved Permanently";
+    case 302: return "Found";
+    case 303: return "See Other";
+    case 304: return "Not Modified";
+    case 305: return "Use Proxy";
+    case 307: return "Temporary Redirect";
+    case 308: return "Permanent Redirect";
+    case 400: return "Bad Request";
+    case 401: return "Unauthorized";
+    case 402: return "Payment Required";
+    case 403: return "Forbidden";
+    case 404: return "Not Found";
+    case 405: return "Method Not Allowed";
+    case 406: return "Not Acceptable";
+    case 407: return "Proxy Authentication Required";
+    case 408: return "Request Timeout";
+    case 409: return "Conflict";
+    case 410: return "Gone";
+    case 411: return "Length Required";
+    case 412: return "Precondition Failed";
+    case 413: return "Content Too Large";
+    case 414: return "URI Too Long";
+    case 415: return "Unsupported Media Type";
+    case 416: return "Range Not Satisfiable";
+    case 417: return "Expectation Failed";
+    case 418: return "I'm a teapot";
+    case 421: return "Misdirected Request";
+    case 422: return "Unprocessable Content";
+    case 423: return "Locked";
+    case 424: return "Failed Dependency";
+    case 425: return "Too Early";
+    case 426: return "Upgrade Required";
+    case 428: return "Precondition Required";
+    case 429: return "Too Many Requests";
+    case 431: return "Request Header Fields Too Large";
+    case 451: return "Unavailable For Legal Reasons";
+    case 500: return "Internal Server Error";
+    case 501: return "Not Implemented";
+    case 502: return "Bad Gateway";
+    case 503: return "Service Unavailable";
+    case 504: return "Gateway Timeout";
+    case 505: return "HTTP Version Not Supported";
+    case 506: return "Variant Also Negotiates";
+    case 507: return "Insufficient Storage";
+    case 508: return "Loop Detected";
+    case 510: return "Not Extended";
+    case 511: return "Network Authentication Required";
+    default: return "Unknown";
+    }
 }
 
 static void on_messages(h2o_multithread_receiver_t *receiver, h2o_linklist_t *messages)
@@ -174,7 +247,7 @@ static void on_messages(h2o_multithread_receiver_t *receiver, h2o_linklist_t *me
         }
         if (request != NULL) {
             request->res.status = message->status;
-            request->res.reason = message->status == 200 ? "OK" : "Service Unavailable";
+            request->res.reason = status_reason(message->status);
             request->res.content_length = message->len;
             h2o_add_header(&request->pool, &request->res.headers, H2O_TOKEN_CONTENT_TYPE,
                            NULL, H2O_STRLIT("application/octet-stream"));
@@ -297,6 +370,7 @@ probe_server *j2o_probe_start(void)
     server->notify[0] = server->notify[1] = -1;
     pthread_mutex_init(&server->mutex, NULL);
     pthread_cond_init(&server->ready, NULL);
+    pthread_cond_init(&server->requests_ready, NULL);
     if (pipe(server->notify) != 0) goto error;
     for (int i = 0; i < 2; ++i) {
         int flags = fcntl(server->notify[i], F_GETFL);
@@ -314,6 +388,7 @@ error:
     if (server->notify[1] >= 0) close(server->notify[1]);
     pthread_mutex_destroy(&server->mutex);
     pthread_cond_destroy(&server->ready);
+    pthread_cond_destroy(&server->requests_ready);
     free(server);
     return NULL;
 }
@@ -394,7 +469,7 @@ uint64_t j2o_probe_profile_identity(probe_server *server, size_t index, unsigned
     profile_trace *trace = state->records + index;
     uint32_t seen = atomic_load_explicit(&trace->seen, memory_order_acquire);
     /* The first stage publishes the immutable ID; never read unpublished data. */
-    return field == 1 ? seen : (seen == 0 ? 0 : trace->data[0]);
+    return field == 1 ? seen : ((seen & (UINT32_C(1) << P_ARRIVAL)) == 0 ? 0 : trace->data[0]);
 }
 int j2o_probe_profile_copy(probe_server *server, size_t index, uint64_t *out, size_t words)
 {
@@ -406,13 +481,51 @@ int j2o_probe_profile_copy(probe_server *server, size_t index, uint64_t *out, si
     return 1;
 }
 
+/* Experimental alternate ingress. It may block only a dedicated native Jolt
+ * thread, never a request carrier. Packets remain native-owned until released. */
+int j2o_probe_ingress_mode(probe_server *server, int mode)
+{
+    if (mode < 0 || mode > 1) return -1;
+    pthread_mutex_lock(&server->mutex);
+    server->ingress_mode = mode;
+    pthread_mutex_unlock(&server->mutex);
+    return 0;
+}
+
+request_packet *j2o_probe_await(probe_server *server)
+{
+    pthread_mutex_lock(&server->mutex);
+    while (server->count == 0 && !server->ingress_stopped)
+        pthread_cond_wait(&server->requests_ready, &server->mutex);
+    request_packet *packet = NULL;
+    if (!server->ingress_stopped && server->count != 0) {
+        packet = server->queue[server->head];
+        server->head = (server->head + 1) % CAPACITY;
+        --server->count;
+        profile_stamp(packet->trace, P_DEQUEUED, 0, 0);
+    }
+    pthread_mutex_unlock(&server->mutex);
+    return packet;
+}
+
+void j2o_probe_interrupt_ingress(probe_server *server)
+{
+    pthread_mutex_lock(&server->mutex);
+    server->ingress_stopped = 1;
+    pthread_cond_broadcast(&server->requests_ready);
+    pthread_mutex_unlock(&server->mutex);
+}
+
+/* Same bounded scalar call with and without collect-safe FFI, for diagnostics. */
+uint64_t j2o_probe_scalar(uint64_t value) { return value + 1; }
+
 request_packet *j2o_probe_take(probe_server *server)
 {
     pthread_mutex_lock(&server->mutex);
-    char buffer[128];
+    char byte;
     ssize_t result;
-    do { result = read(server->notify[0], buffer, sizeof(buffer)); }
-    while (result > 0 || (result < 0 && errno == EINTR));
+    do { result = read(server->notify[0], &byte, 1); }
+    while (result < 0 && errno == EINTR);
     request_packet *packet = NULL;
     if (server->count != 0) {
         packet = server->queue[server->head];
@@ -440,22 +553,36 @@ void j2o_probe_release(probe_server *server, request_packet *packet)
     atomic_fetch_sub(&server->packets, 1);
 }
 
-int j2o_probe_respond(probe_server *server, uint64_t id, int status, const char *body, size_t len, profile_trace *trace)
+response_message *j2o_probe_response_create(uint64_t id, int status, const char *body, size_t len, profile_trace *trace)
 {
-    profile_stamp(trace, P_SUBMIT_ENTER, 0, 0);
-    if (len > MAX_RESPONSE || status < 200 || status > 599 || atomic_load(&server->stopping)) return -1;
+    uint64_t preparation_enter_ns = trace == NULL ? 0 : profile_now();
+    if (len > MAX_RESPONSE || status < 200 || status > 599 || (len != 0 && body == NULL)) return NULL;
     response_message *message = malloc(sizeof(*message) + len);
-    if (message == NULL) return -1;
+    if (message == NULL) return NULL;
     message->super.link = (h2o_linklist_t){0};
     message->id = id;
     message->status = status;
     message->len = len;
     message->trace = trace;
-    if (trace != NULL) trace->data[PROFILE_RESPONSE_BYTES] = sizeof(*message) + len;
+    message->preparation_enter_ns = preparation_enter_ns;
     if (len != 0) memcpy(message->body, body, len);
-    profile_stamp(trace, P_RESPONSE_QUEUED, 0, 0);
+    return message;
+}
+
+/* Submit consumes only on success. Callers must join all producers before stop. */
+int j2o_probe_response_submit(probe_server *server, response_message *message)
+{
+    if (atomic_load(&server->stopping)) return -1;
+    if (message->trace != NULL) message->trace->data[PROFILE_RESPONSE_BYTES] = sizeof(*message) + message->len;
+    profile_stamp_at(message->trace, P_SUBMIT_ENTER, 0, 0, message->preparation_enter_ns);
+    profile_stamp(message->trace, P_RESPONSE_QUEUED, 0, 0);
     h2o_multithread_send_message(&server->receiver, &message->super);
     return 0;
+}
+
+void j2o_probe_response_release(response_message *message)
+{
+    free(message);
 }
 
 uint64_t j2o_probe_stat(probe_server *server, int field)
@@ -473,6 +600,7 @@ uint64_t j2o_probe_stat(probe_server *server, int field)
 
 void j2o_probe_stop(probe_server *server)
 {
+    j2o_probe_interrupt_ingress(server);
     atomic_store(&server->stopping, 1);
     h2o_multithread_send_message(&server->receiver, NULL);
     pthread_join(server->thread, NULL);
@@ -488,6 +616,7 @@ void j2o_probe_destroy(probe_server *server)
     close(server->notify[0]); close(server->notify[1]);
     pthread_mutex_destroy(&server->mutex);
     pthread_cond_destroy(&server->ready);
+    pthread_cond_destroy(&server->requests_ready);
     profile_dispose(atomic_load(&server->profile));
     free(server);
 }

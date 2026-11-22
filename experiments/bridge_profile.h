@@ -18,6 +18,8 @@ static const char *profile_stage_names[P_STAGE_COUNT] = {
 };
 #define PROFILE_WORDS (1 + P_STAGE_COUNT * 3 + 2)
 #define PROFILE_ALL_STAGES ((UINT32_C(1) << P_STAGE_COUNT) - 1)
+#define PROFILE_WRITING (UINT32_C(1) << 30)
+#define PROFILE_INVALID (UINT32_C(1) << 31)
 #define PROFILE_PACKET_BYTES (1 + P_STAGE_COUNT * 3)
 #define PROFILE_RESPONSE_BYTES (PROFILE_PACKET_BYTES + 1)
 
@@ -42,21 +44,29 @@ static uint64_t profile_now(void)
     return (uint64_t)value.tv_sec * UINT64_C(1000000000) + (uint64_t)value.tv_nsec;
 }
 
-static void profile_stamp(profile_trace *trace, unsigned stage, uint64_t allocated, uint64_t collections)
+static void profile_stamp_at(profile_trace *trace, unsigned stage, uint64_t allocated, uint64_t collections,
+                             uint64_t timestamp)
 {
     if (trace == NULL) return;
     assert(stage < P_STAGE_COUNT);
-    /* Failed/competing replies do not form a successful serial trace. Freeze
-     * its data after completion or invalidation, including late handler returns. */
+    /* Reserve the stage before touching non-atomic fields. Competing response
+     * producers can prepare before terminal arbitration; invalidate their trace
+     * without racing the writer or exporting a partially published record. */
     uint32_t expected = (UINT32_C(1) << stage) - 1;
-    if (atomic_load_explicit(&trace->seen, memory_order_acquire) != expected) {
-        atomic_fetch_or_explicit(&trace->seen, UINT32_C(1) << 31, memory_order_release);
+    if (!atomic_compare_exchange_strong_explicit(&trace->seen, &expected, expected | PROFILE_WRITING,
+                                                  memory_order_acquire, memory_order_relaxed)) {
+        atomic_fetch_or_explicit(&trace->seen, PROFILE_INVALID, memory_order_release);
         return;
     }
-    trace->data[1 + stage] = profile_now();
+    trace->data[1 + stage] = timestamp;
     trace->data[1 + P_STAGE_COUNT + stage] = allocated;
     trace->data[1 + P_STAGE_COUNT * 2 + stage] = collections;
-    atomic_fetch_or_explicit(&trace->seen, UINT32_C(1) << stage, memory_order_release);
+    atomic_fetch_xor_explicit(&trace->seen, PROFILE_WRITING | (UINT32_C(1) << stage), memory_order_release);
+}
+
+static void profile_stamp(profile_trace *trace, unsigned stage, uint64_t allocated, uint64_t collections)
+{
+    if (trace != NULL) profile_stamp_at(trace, stage, allocated, collections, profile_now());
 }
 
 static profile_trace *profile_select(profile_state *state, uint64_t id)

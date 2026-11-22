@@ -27,7 +27,8 @@
         observer (:profile server)
         calibration (atom nil)
         before (atom nil)
-        native-before (atom nil)]
+        native-before (atom nil)
+        sampling? (atom false)]
     (println "READY" (:port server)) (flush)
     (try
       (loop []
@@ -43,13 +44,23 @@
               (reset! native-before (bridge/stats server))
               (reset! before (profiling/counters))
               (when observer (profiling/recording! observer true))
-              (when (= :cpu mode) (profile/sample! {:interval-ms 1 :depth 64}))
               (println "BEGUN") (flush) (recur))
+          "start-cpu"
+          (do (when-not (and (= :cpu mode) @before (not @sampling?))
+                (throw (ex-info "CPU sampler cannot start in this state" {})))
+              (profile/sample! {:interval-ms 1 :depth 64})
+              (reset! sampling? true)
+              (println "CPU-STARTED") (flush) (recur))
+          "stop-cpu"
+          (do (when-not @sampling? (throw (ex-info "CPU sampler is not running" {})))
+              (profile/stop-sampling!)
+              (reset! sampling? false)
+              (println "CPU-STOPPED") (flush) (recur))
           "end"
           (do (when-not @before (throw (ex-info "Profiling window has not started" {})))
+              (when @sampling? (throw (ex-info "Stop CPU sampling before ending the window" {})))
               (quiesce! server)
               (when observer (profiling/recording! observer false))
-              (when (= :cpu mode) (profile/stop-sampling!))
               (let [after (profiling/counters)
                     stats (bridge/stats server)
                     trace (when observer (profiling/capture observer))]
@@ -72,6 +83,6 @@
           nil nil
           (throw (ex-info "Unknown profiling command" {}))))
       (finally
-        (when (= :cpu mode) (profile/stop-sampling!))
+        (when @sampling? (profile/stop-sampling!))
         (prn {:stopped (bridge/stop! server)}) (flush)
         (shutdown-agents)))))

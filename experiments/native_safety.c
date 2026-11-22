@@ -36,6 +36,7 @@ static void send_all(int fd, const void *data, size_t length)
 
 static request_packet *take_packet(probe_server *server)
 {
+    if (server->ingress_mode == 1) return j2o_probe_await(server);
     struct pollfd fd = {j2o_probe_fd(server), POLLIN, 0};
     assert(poll(&fd, 1, 3000) == 1);
     request_packet *packet = j2o_probe_take(server);
@@ -56,21 +57,111 @@ static int read_header(int fd)
     header[count] = 0;
     int status = 0;
     assert(sscanf(header, "HTTP/%*s %d", &status) == 1);
+    if (status == 201) assert(strncmp(header, "HTTP/1.1 201 Created\r\n", 22) == 0);
+    if (status == 500) assert(strncmp(header, "HTTP/1.1 500 Internal Server Error\r\n", 36) == 0);
+    if (status == 599) assert(strncmp(header, "HTTP/1.1 599 Unknown\r\n", 22) == 0);
     return status;
+}
+
+static void submit_response(probe_server *server, uint64_t id, int status,
+                            const char *body, size_t length, profile_trace *trace)
+{
+    response_message *message = j2o_probe_response_create(id, status, body, length, trace);
+    assert(message != NULL);
+    assert(j2o_probe_response_submit(server, message) == 0);
+}
+
+static void queued_readiness(void)
+{
+    probe_server *server = j2o_probe_start();
+    assert(server != NULL);
+    int clients[3];
+    const char *request = "GET /queued HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    for (size_t i = 0; i < 3; ++i) {
+        clients[i] = connect_client(server);
+        send_all(clients[i], request, strlen(request));
+    }
+    for (unsigned attempt = 0; j2o_probe_stat(server, 0) != 3; ++attempt) {
+        assert(attempt < 3000);
+        struct timespec pause = {0, 1000000};
+        nanosleep(&pause, NULL);
+    }
+    /* All producer writes precede these three independent readiness cycles. */
+    for (size_t i = 0; i < 3; ++i) {
+        request_packet *packet = take_packet(server);
+        submit_response(server, packet->id, 200, "", 0, NULL);
+        j2o_probe_release(server, packet);
+    }
+    struct pollfd fd = {j2o_probe_fd(server), POLLIN, 0};
+    assert(poll(&fd, 1, 0) == 0);
+    for (size_t i = 0; i < 3; ++i) {
+        assert(read_header(clients[i]) == 200);
+        close(clients[i]);
+    }
+    j2o_probe_stop(server);
+    assert(j2o_probe_stat(server, 5) == 0);
+    j2o_probe_destroy(server);
+}
+
+static void *idle_waiter(void *data)
+{
+    assert(j2o_probe_await(data) == NULL);
+    return NULL;
+}
+
+enum { TRACE_RACE_COUNT = 4096 };
+typedef struct {
+    _Atomic unsigned ready;
+    _Atomic int go;
+    profile_trace traces[TRACE_RACE_COUNT];
+} trace_race;
+
+static void *race_trace_writer(void *data)
+{
+    trace_race *race = data;
+    atomic_fetch_add(&race->ready, 1);
+    while (!atomic_load(&race->go)) {}
+    for (size_t i = 0; i < TRACE_RACE_COUNT; ++i)
+        profile_stamp(race->traces + i, P_ARRIVAL, 123, 456);
+    return NULL;
+}
+
+static void competing_trace_publication(void)
+{
+    trace_race *race = calloc(1, sizeof(*race));
+    assert(race != NULL);
+    pthread_t writers[2];
+    for (size_t i = 0; i < 2; ++i)
+        assert(pthread_create(writers + i, NULL, race_trace_writer, race) == 0);
+    while (atomic_load(&race->ready) != 2) {}
+    atomic_store(&race->go, 1);
+    for (size_t i = 0; i < 2; ++i) assert(pthread_join(writers[i], NULL) == 0);
+    for (size_t i = 0; i < TRACE_RACE_COUNT; ++i) {
+        profile_trace *trace = race->traces + i;
+        assert(atomic_load(&trace->seen) == (PROFILE_INVALID | 1));
+        assert(trace->data[1 + P_ARRIVAL] != 0);
+        assert(trace->data[1 + P_STAGE_COUNT + P_ARRIVAL] == 123);
+        assert(trace->data[1 + P_STAGE_COUNT * 2 + P_ARRIVAL] == 456);
+    }
+    free(race);
 }
 
 int main(void)
 {
+    queued_readiness();
+    competing_trace_publication();
     unsigned char payload[MAX_BODY + 1], result[MAX_BODY];
     for (size_t i = 0; i < sizeof(payload); ++i) payload[i] = (unsigned char)i;
     for (int round = 0; round < 10; ++round) {
         probe_server *server = j2o_probe_start();
         assert(server != NULL);
+        assert(j2o_probe_ingress_mode(server, round % 2) == 0);
         if (round % 2 != 0) {
             assert(j2o_probe_profile_configure(server, 2, 1) == 0);
             assert(j2o_probe_profile_recording(server, 1) == 0);
         }
         const size_t lengths[] = {0, 1, MAX_BODY};
+        const int statuses[] = {201, 500, 599};
         for (size_t test = 0; test < sizeof(lengths) / sizeof(lengths[0]); ++test) {
             int client = connect_client(server);
             size_t length = lengths[test];
@@ -85,10 +176,10 @@ int main(void)
             assert(received == length);
             assert(memcmp(body, payload, length) == 0);
             uint64_t id = j2o_probe_id(packet);
-            assert(j2o_probe_respond(server, id, 200, NULL, MAX_RESPONSE + 1, NULL) == -1);
-            assert(j2o_probe_respond(server, id, 200, body, length, j2o_probe_profile_trace(packet)) == 0);
+            assert(j2o_probe_response_create(id, 200, NULL, MAX_RESPONSE + 1, NULL) == NULL);
+            submit_response(server, id, statuses[test], body, length, j2o_probe_profile_trace(packet));
             j2o_probe_release(server, packet);
-            assert(read_header(client) == 200);
+            assert(read_header(client) == statuses[test]);
             size_t offset = 0;
             while (offset < length) {
                 ssize_t count = recv(client, result + offset, length - offset, 0);
@@ -97,7 +188,7 @@ int main(void)
             }
             assert(memcmp(result, payload, length) == 0);
             close(client);
-            assert(j2o_probe_respond(server, id, 200, "late", 4, NULL) == 0);
+            submit_response(server, id, 200, "late", 4, NULL);
         }
         int oversized = connect_client(server);
         const char *header = "POST /echo HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 4097\r\n\r\n";
@@ -114,10 +205,17 @@ int main(void)
         char *arguments[] = {"sleep", "10", NULL};
         assert(posix_spawn(&child, "/bin/sleep", NULL, NULL, arguments, environ) == 0);
         int port = j2o_probe_port(server);
+        pthread_t waiter;
+        assert(pthread_create(&waiter, NULL, idle_waiter, server) == 0);
         j2o_probe_stop(server);
+        assert(pthread_join(waiter, NULL) == 0);
         assert(j2o_probe_stat(server, 5) == 0);
         assert(j2o_probe_stat(server, 6) == 0);
         assert(j2o_probe_stat(server, 2) == 3);
+        response_message *unsubmitted = j2o_probe_response_create(1, 200, "stopped", 7, NULL);
+        assert(unsubmitted != NULL);
+        assert(j2o_probe_response_submit(server, unsubmitted) == -1);
+        j2o_probe_response_release(unsubmitted);
         if (round % 2 != 0) {
             uint64_t data[PROFILE_WORDS];
             assert(j2o_probe_profile_info(server, 1) == 2);
@@ -158,6 +256,6 @@ int main(void)
                     accepted, error, ntohs(local.sin_port), port);
         assert(accepted == -1 && error == ECONNREFUSED);
     }
-    puts("PASS: native binary boundaries, stale replies, and pending-request teardown (10 lifecycles)");
+    puts("PASS: native binary boundaries, both ingress paths, and waiter teardown (10 lifecycles)");
     return 0;
 }

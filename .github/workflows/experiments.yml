@@ -3,6 +3,8 @@ name: Experiments
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -58,12 +60,28 @@ jobs:
         run: jolt -m j2o.experiments.http2
       - name: Profiling identity, bounded storage, GC, and deadline correctness
         run: jolt -m j2o.experiments.profile-checks
+      - name: Alternate ingress and scratch ownership correctness
+        run: |
+          for ingress in poller waiter; do
+            for scratch in 0 1; do
+              export J2O_PROBE_INGRESS="$ingress" J2O_PROBE_SCRATCH="$scratch"
+              jolt -m j2o.experiments.profile-checks
+              jolt -m j2o.experiments.differential
+              jolt -m j2o.experiments.http2
+              jolt -m j2o.experiments.gc safe
+              jolt -m j2o.experiments.gc unsafe
+            done
+          done
       - name: Native address and undefined-behavior sanitizers
         run: CC=clang bash experiments/native_safety.sh
       - name: Runner-only performance comparison
         run: jolt -m j2o.experiments.bench
       - name: Runner-only single-request stage, allocation, and CPU profiles
         run: jolt -m j2o.experiments.profile-run
+      - name: Paired ingress, scratch, scheduler, and FFI investigation
+        run: |
+          jolt -m j2o.experiments.tuning-run
+          jolt -m j2o.experiments.tuning-report
       - name: Save raw experiment artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

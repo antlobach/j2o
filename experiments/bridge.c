@@ -59,8 +59,8 @@ typedef struct connection {
 struct probe_server {
     pthread_t thread;
     pthread_mutex_t mutex;
-    pthread_cond_t ready;
-    int started, error, notify[2], port;
+    pthread_cond_t ready, requests_ready;
+    int started, error, notify[2], port, ingress_mode, ingress_stopped;
     h2o_globalconf_t config;
     h2o_context_t context;
     h2o_accept_ctx_t accept;
@@ -151,7 +151,10 @@ static int on_request(h2o_handler_t *handler, h2o_req_t *request)
     atomic_fetch_add(&server->packets, 1);
     atomic_fetch_add(&server->admitted, 1);
     profile_stamp(trace, P_QUEUED, 0, 0);
-    notify_locked(server);
+    if (server->ingress_mode == 1)
+        pthread_cond_signal(&server->requests_ready);
+    else
+        notify_locked(server);
     pthread_mutex_unlock(&server->mutex);
     return 0;
 }
@@ -297,6 +300,7 @@ probe_server *j2o_probe_start(void)
     server->notify[0] = server->notify[1] = -1;
     pthread_mutex_init(&server->mutex, NULL);
     pthread_cond_init(&server->ready, NULL);
+    pthread_cond_init(&server->requests_ready, NULL);
     if (pipe(server->notify) != 0) goto error;
     for (int i = 0; i < 2; ++i) {
         int flags = fcntl(server->notify[i], F_GETFL);
@@ -314,6 +318,7 @@ error:
     if (server->notify[1] >= 0) close(server->notify[1]);
     pthread_mutex_destroy(&server->mutex);
     pthread_cond_destroy(&server->ready);
+    pthread_cond_destroy(&server->requests_ready);
     free(server);
     return NULL;
 }
@@ -406,6 +411,44 @@ int j2o_probe_profile_copy(probe_server *server, size_t index, uint64_t *out, si
     return 1;
 }
 
+/* Experimental alternate ingress. It may block only a dedicated native Jolt
+ * thread, never a request carrier. Packets remain native-owned until released. */
+int j2o_probe_ingress_mode(probe_server *server, int mode)
+{
+    if (mode < 0 || mode > 1) return -1;
+    pthread_mutex_lock(&server->mutex);
+    server->ingress_mode = mode;
+    pthread_mutex_unlock(&server->mutex);
+    return 0;
+}
+
+request_packet *j2o_probe_await(probe_server *server)
+{
+    pthread_mutex_lock(&server->mutex);
+    while (server->count == 0 && !server->ingress_stopped)
+        pthread_cond_wait(&server->requests_ready, &server->mutex);
+    request_packet *packet = NULL;
+    if (!server->ingress_stopped && server->count != 0) {
+        packet = server->queue[server->head];
+        server->head = (server->head + 1) % CAPACITY;
+        --server->count;
+        profile_stamp(packet->trace, P_DEQUEUED, 0, 0);
+    }
+    pthread_mutex_unlock(&server->mutex);
+    return packet;
+}
+
+void j2o_probe_interrupt_ingress(probe_server *server)
+{
+    pthread_mutex_lock(&server->mutex);
+    server->ingress_stopped = 1;
+    pthread_cond_broadcast(&server->requests_ready);
+    pthread_mutex_unlock(&server->mutex);
+}
+
+/* Same bounded scalar call with and without collect-safe FFI, for diagnostics. */
+uint64_t j2o_probe_scalar(uint64_t value) { return value + 1; }
+
 request_packet *j2o_probe_take(probe_server *server)
 {
     pthread_mutex_lock(&server->mutex);
@@ -473,6 +516,7 @@ uint64_t j2o_probe_stat(probe_server *server, int field)
 
 void j2o_probe_stop(probe_server *server)
 {
+    j2o_probe_interrupt_ingress(server);
     atomic_store(&server->stopping, 1);
     h2o_multithread_send_message(&server->receiver, NULL);
     pthread_join(server->thread, NULL);
@@ -488,6 +532,7 @@ void j2o_probe_destroy(probe_server *server)
     close(server->notify[0]); close(server->notify[1]);
     pthread_mutex_destroy(&server->mutex);
     pthread_cond_destroy(&server->ready);
+    pthread_cond_destroy(&server->requests_ready);
     profile_dispose(atomic_load(&server->profile));
     free(server);
 }

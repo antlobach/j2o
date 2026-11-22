@@ -36,6 +36,7 @@ static void send_all(int fd, const void *data, size_t length)
 
 static request_packet *take_packet(probe_server *server)
 {
+    if (server->ingress_mode == 1) return j2o_probe_await(server);
     struct pollfd fd = {j2o_probe_fd(server), POLLIN, 0};
     assert(poll(&fd, 1, 3000) == 1);
     request_packet *packet = j2o_probe_take(server);
@@ -59,6 +60,12 @@ static int read_header(int fd)
     return status;
 }
 
+static void *idle_waiter(void *data)
+{
+    assert(j2o_probe_await(data) == NULL);
+    return NULL;
+}
+
 int main(void)
 {
     unsigned char payload[MAX_BODY + 1], result[MAX_BODY];
@@ -66,6 +73,7 @@ int main(void)
     for (int round = 0; round < 10; ++round) {
         probe_server *server = j2o_probe_start();
         assert(server != NULL);
+        assert(j2o_probe_ingress_mode(server, round % 2) == 0);
         if (round % 2 != 0) {
             assert(j2o_probe_profile_configure(server, 2, 1) == 0);
             assert(j2o_probe_profile_recording(server, 1) == 0);
@@ -114,7 +122,10 @@ int main(void)
         char *arguments[] = {"sleep", "10", NULL};
         assert(posix_spawn(&child, "/bin/sleep", NULL, NULL, arguments, environ) == 0);
         int port = j2o_probe_port(server);
+        pthread_t waiter;
+        assert(pthread_create(&waiter, NULL, idle_waiter, server) == 0);
         j2o_probe_stop(server);
+        assert(pthread_join(waiter, NULL) == 0);
         assert(j2o_probe_stat(server, 5) == 0);
         assert(j2o_probe_stat(server, 6) == 0);
         assert(j2o_probe_stat(server, 2) == 3);
@@ -158,6 +169,6 @@ int main(void)
                     accepted, error, ntohs(local.sin_port), port);
         assert(accepted == -1 && error == ECONNREFUSED);
     }
-    puts("PASS: native binary boundaries, stale replies, and pending-request teardown (10 lifecycles)");
+    puts("PASS: native binary boundaries, both ingress paths, and waiter teardown (10 lifecycles)");
     return 0;
 }

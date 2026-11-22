@@ -202,6 +202,16 @@ All 15 profiling windows completed: 216,564 client-validated responses and 216,5
 
 Prioritize investigation of readiness-poller wakeup and request-fiber scheduling before optimizing response copies or adding zero-copy ownership. The stage distribution and sampled stacks support that order, but do not yet establish which internal operation causes the handoff cost. Preserve the existing transport, response validation, fiber/Var semantics, and GC-safety gates for any optimization.
 
+## Performance decision gate before production
+
+The current experiment does not establish an architectural latency floor. Compare the existing generic readiness poller with a dedicated, collect-safe native ingress waiter transferring owned packets through a bounded channel to the same dispatch and request fibers. Separately compare per-field temporary length buffers with one dispatcher-owned native scratch buffer. A factorial comparison isolates ingress and marshalling effects without changing Ring handlers or response policy.
+
+The runner executes five alternating-order HTTP comparisons at concurrency 1, 16, and 64, with unmodified external H2O retained as a transport ceiling. Three fresh-process rounds per variant capture timings, allocation, managed CPU samples, and an idle control. Component probes distinguish same-carrier fiber creation/join, native-thread channel handoff, and identical bounded scalar FFI calls with/without a collect-safe transition. Component probes are diagnostics, never substitutes for validated HTTP performance.
+
+Every candidate must pass the existing binary, Var reload, overload, deadline, disconnect, shutdown, HTTP/2, GC positive/negative control, and native sanitizer gates before measurement. Joining the alternate native waiter and draining every transferred packet precede native destruction. No application handler executes on an H2O thread, no managed pointer escapes into native storage, and no GC-safety transition is removed.
+
+Use same-run paired ratios and all raw repetitions to decide which changes to carry forward. A material latency/throughput improvement must not purchase idle busy-wait CPU, unbounded memory, lost cancellation, or a regression under concurrent load. All builds, full QA, sanitizers, stress tests, and performance measurements run on GitHub runners; local work remains lightweight editing and inspection.
+
 ## Experiment limits, not public API promises
 
 The probe has a fixed loopback listener, a small request/body cap, one named carrier, limited Ring fields, only string/byte response bodies, a simple response queue, no streaming/TLS/WebSocket/middleware API, and forced shutdown. It does not yet propagate every native disconnect into fiber cancellation. Its native H2O build currently omits wslay and optional compression integration. These are explicit boundaries of a feasibility experiment, not a partial implementation advertised as production-ready.

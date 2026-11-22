@@ -16,6 +16,6 @@ for entry in verify_numeric verify_host verify_errors; do
     -I "$H2O_SOURCE_DIR/deps/quicly/include" \
     --bounds-check --pointer-check --pointer-overflow-check --signed-overflow-check \
     --memory-leak-check --malloc-may-fail --malloc-fail-null \
-    --unwind 600 --unwinding-assertions --slice-formula \
+    --unwind 600 --unwinding-assertions --slice-formula --trace \
     2>&1 | tee "$root/.cache/formal/$entry.log"
 done

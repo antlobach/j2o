@@ -6,7 +6,16 @@ extern uint32_t nondet_u32(void);
 extern uint64_t nondet_u64(void);
 extern int nondet_int(void);
 extern unsigned char nondet_byte(void);
-extern void __CPROVER_assume(_Bool);
+extern void __CPROVER_assume(__CPROVER_bool);
+
+/* CBMC 6.11 has no strnlen body. Model the standard bounded libc operation;
+ * bridge functions remain the production definitions included above. */
+size_t strnlen(const char *text, size_t bound)
+{
+    size_t length = 0;
+    while (length < bound && text[length] != 0) ++length;
+    return length;
+}
 
 static void terminated(const j2o_error *error)
 {

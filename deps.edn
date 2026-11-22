@@ -15,4 +15,5 @@
                                {:git/url "https://github.com/jolt-lang/http-client"
                                 :git/tag "v0.1.4" :git/sha "e0c935e99b92db8e0934867f1cebcf11b3f837a5"}}
                   :main-opts ["-m" "j2o.test-runner"]}
-           :ci {:extra-paths ["test"] :main-opts ["-m" "j2o.test-runner"]}}}
+           :ci {:extra-paths ["test"] :main-opts ["-m" "j2o.test-runner"]}
+           :gc {:extra-paths ["test"] :main-opts ["-m" "j2o.gc-join"]}}}

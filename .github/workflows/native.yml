@@ -82,6 +82,21 @@ jobs:
       - name: Managed ABI and copied-error smoke
         if: matrix.mode == 'normal'
         run: jolt -M:ci
+      - name: Real production join GC progress and unsafe negative control
+        if: matrix.mode == 'normal'
+        run: bash test/native/gc.sh
+      - name: Obtain pinned Ring compatibility oracle
+        if: matrix.mode == 'normal'
+        run: |
+          git init "$RUNNER_TEMP/ring-reference"
+          git -C "$RUNNER_TEMP/ring-reference" remote add origin https://github.com/jolt-lang/ring-chez-adapter.git
+          git -C "$RUNNER_TEMP/ring-reference" fetch --depth 1 origin e37d52f92c1c50d0a9af360e1d994554ec48f202
+          git -C "$RUNNER_TEMP/ring-reference" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/ring-reference" rev-parse HEAD)" = e37d52f92c1c50d0a9af360e1d994554ec48f202
+      - name: Check every reference public var, arity, alias and constant
+        if: matrix.mode == 'normal'
+        working-directory: ${{ runner.temp }}/ring-reference
+        run: jolt -e "(load-file \"$GITHUB_WORKSPACE/test/j2o/compat_manifest.clj\") (j2o.compat-manifest/check-reference! \"$GITHUB_WORKSPACE\")"
       - name: Save qualification evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

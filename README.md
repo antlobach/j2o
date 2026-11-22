@@ -2,7 +2,7 @@
 
 An H2O-backed Ring adapter under development for Jolt.
 
-The repository contains executable transport experiments and an internal native lifecycle ABI, not a production adapter or a published Ring API. The experiments exercise real H2O connections and real Jolt fibers; there is no substitute HTTP server or simulated transport.
+The repository contains executable transport experiments and a development unary Ring adapter. It is not production-ready or a complete `ring-chez` replacement: streaming, TLS, WebSockets, mTLS, and namespace parity remain unfinished. The transport uses real H2O connections.
 
 ## Constraints
 
@@ -13,15 +13,15 @@ The repository contains executable transport experiments and an internal native 
 - Calls that can allocate, lock, copy variable amounts of data, or wait use collect-safe FFI transitions. C retains only native-owned buffers, never pointers into movable Jolt objects. Native H2O threads never call into Jolt.
 - Performance measurements run **only on GitHub runners**, against unmodified H2O from the same pinned revision.
 
-## Internal native lifecycle
+## Development native bridge
 
-`native/j2o_bridge.h` defines exact-match development ABI `0x80000001`; it is not release ABI v1. `src/j2o/native.clj` checks the version before binding the remaining functions. This slice binds and adopts listeners but does **not** accept HTTP requests.
+`native/j2o_bridge.h` defines exact-match development ABI `0x80000002`; it is not release ABI v1. `src/j2o/native.clj` checks the version before binding the remaining functions. The bridge accepts HTTP/1 and HTTP/2 unary requests and transfers owned request events and response commands across the H2O owner-thread boundary.
 
 Start copies configuration and publishes a handle only after all resolved listeners and the H2O owner thread are initialized. Returned failures leave no server handle and roll back bridge-controlled resources. Stock H2O's process-fatal allocation, descriptor-creation and internal-notification failures remain process-fatal; the bridge does not intercept `h2o_fatal` or promise recovery from a host abort.
 
 Errors are bounded caller-owned copies. A join timeout retains the server; successful join does not destroy it. The event descriptor is borrowed until destruction and must not be closed by callers. Destroy requires successful join and quiescent foreign callers.
 
-The `Native lifecycle` GitHub workflow builds external H2O and the bridge with matching ASan/UBSan/leak or separate TSan instrumentation. It runs startup rollback, concurrent/repeated lifecycle, real-join GC controls and stateful native fuzzing. CBMC checks production configuration/error functions with explicit libc models and bounded inputs; it does not prove H2O, OS behavior or lifecycle concurrency. Allium structural/process checks are specification evidence, not a proof of C implementation correctness.
+The `Native lifecycle` GitHub workflow builds external H2O and the bridge with matching ASan/UBSan/leak or separate TSan instrumentation. It runs startup rollback, concurrent/repeated lifecycle, unary wire checks, real-join GC controls and stateful native fuzzing. CBMC checks production configuration/error functions with explicit libc models and bounded inputs; it does not prove H2O, OS behavior or lifecycle concurrency. Allium structural/process checks are specification evidence, not a proof of C implementation correctness.
 
 ## Reproduce correctness experiments
 Run the commands below in GitHub Actions, not on the development workstation. Builds, correctness suites, sanitizers, GC probes, stress, and performance workloads are remote-only for this project.

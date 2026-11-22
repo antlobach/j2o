@@ -8,7 +8,7 @@
   {:port [2 0 65535]
    :max-request-bytes [4 1 Long/MAX_VALUE]
    :max-header-bytes [5 1 Long/MAX_VALUE]
-   :max-live-requests [6 1 4294967295]
+   :max-live-requests [6 1 Integer/MAX_VALUE]
    :max-event-queue [7 1 Long/MAX_VALUE]
    :max-response-queue [8 1 Long/MAX_VALUE]
    :max-queued-bytes [9 1 Long/MAX_VALUE]
@@ -29,9 +29,7 @@
     (when-not (poller/available?)
       (throw (ex-info "j2o requires a supported readiness poller" {:key :strategy :given strategy})))
     (when (and (:handler-on-fiber opts) (not= strategy :fibers))
-      (throw (ex-info ":handler-on-fiber requires :strategy :fibers" {:key :handler-on-fiber})))
-    (when (and (:handler-on-fiber opts) (pos? (get opts :handler-timeout-ms 0)))
-      (throw (ex-info ":handler-on-fiber cannot be combined with a handler deadline" {:key :handler-on-fiber}))))
+      (throw (ex-info ":handler-on-fiber requires :strategy :fibers" {:key :handler-on-fiber}))))
   (doseq [[key [_ minimum maximum]] numeric-options :when (contains? opts key)]
     (let [value (get opts key)]
       (when-not (and (integer? value) (<= minimum value maximum))
@@ -40,13 +38,15 @@
     (let [value (get opts key) minimum (if (= key :worker-threads) 1 0)]
       (when-not (and (integer? value) (<= minimum value Integer/MAX_VALUE))
         (throw (ex-info "Invalid server option" {:key key :given value})))))
+  (when (and (:handler-on-fiber opts) (pos? (get opts :handler-timeout-ms 0)))
+    (throw (ex-info ":handler-on-fiber cannot be combined with a handler deadline" {:key :handler-on-fiber})))
   (doseq [key [:reuse-port :handler-on-fiber] :when (contains? opts key)]
     (when-not (boolean? (get opts key))
       (throw (ex-info "Expected a boolean server option" {:key key :given (get opts key)}))))
   (when (and (contains? opts :host) (not (and (string? (:host opts)) (seq (:host opts)))))
     (throw (ex-info "Expected a non-empty host" {:key :host :given (:host opts)})))
-  (when (and (contains? opts :on-failure) (not (fn? (:on-failure opts))))
-    (throw (ex-info "Expected an on-failure function" {:key :on-failure :given (:on-failure opts)})))
+  (when (and (contains? opts :on-failure) (not (or (fn? (:on-failure opts)) (var? (:on-failure opts)))))
+    (throw (ex-info "Expected an on-failure function or Var" {:key :on-failure :given (:on-failure opts)})))
   (doseq [key [:tls :ws-handler :ws-guard] :when (contains? opts key)]
     (throw (ex-info "Transport option is not yet available" {:key key :given (get opts key)}))))
 

@@ -43,6 +43,6 @@
   (try
     (error-layout!)
     (dotimes [_ 20] (native-smoke!))
-    (ring-smoke/run!)
+    (ring-smoke/run-smoke!)
     (println "all passed: managed ABI, copied error lifetime and native lifecycle smoke")
     (finally (shutdown-agents))))

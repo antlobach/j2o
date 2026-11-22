@@ -1,5 +1,5 @@
 -- allium: 3
--- Internal lifecycle slice, not a public Ring server or an HTTP accept path.
+-- Internal lifecycle scope; request handling is specified separately.
 -- Runtime surfaces below report internal outcomes; they are NOT application ABI.
 -- Stock H2O may abort the host on allocation, loop/queue descriptor creation or
 -- internal notification failure. Those process exits are outside returned-error
@@ -44,7 +44,7 @@ contract ErrorAndABI {
     @invariant ExactVersion
         -- Development ABI 0x80000002 requires exact managed/native equality.
         -- Result values are OK=0 INVALID=1 NOMEM=2 OS=3 UNSUPPORTED=4
-        -- QUEUE_FULL=5 STOPPED=6 STALE=7; the last three are reserved here.
+        -- QUEUE_FULL=5 STOPPED=6 STALE=7; request operations use queue outcomes.
         -- Error size is 524 bytes; offsets are abi_size=0 result=4 os_errno=8
         -- message=12 syscall=268 errno_name=300 key=332 given=396.
     @invariant CopiedErrors

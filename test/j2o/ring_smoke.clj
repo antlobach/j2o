@@ -1,5 +1,6 @@
 (ns j2o.ring-smoke
   (:require [j2o.experiments.wire :as wire]
+            [j2o.native :as native]
             [jolt.fibers :as fib]
             [ring-chez.adapter :as adapter]))
 
@@ -41,16 +42,50 @@
       (finally (adapter/stop-server server)))))
 
 (defn- deadline! []
-  (let [server (adapter/run-server (fn [_] (Thread/sleep 100) {:status 200 :body "late"})
+  (let [release (promise)
+        server (adapter/run-server (fn [_] @release {:status 200 :body "late"})
                                    {:port 0 :worker-threads 1 :handler-timeout-ms 10})]
     (try
       (let [result (wire/request! (:port server) "/")]
         (equal! :deadline-status 503 (:status result))
         (equal! :deadline-body "Service Unavailable" (wire/text result)))
+      (finally (deliver release true) (adapter/stop-server server)))))
+
+(defn- failure-and-byte-budget! []
+  (let [calls (atom 0)
+        server (adapter/run-server
+                 (fn [_] {:status 200 :body (apply str (repeat 1024 "x"))})
+                 {:port 0 :worker-threads 1 :max-queued-bytes 256
+                  :on-failure (fn [_ _] (swap! calls inc) {:status 501 :body "too large"})})]
+    (try
+      (let [result (wire/request! (:port server) "/")]
+        (equal! :oversize-status 501 (:status result))
+        (equal! :oversize-body "too large" (wire/text result))
+        (equal! :failure-hook-once 1 @calls))
       (finally (adapter/stop-server server)))))
 
-(defn run! []
+(defn- graceful-drain! []
+  (let [entered (promise) release (promise)
+        server (adapter/run-server (fn [_] (deliver entered true) @release {:status 200 :body "drained"})
+                                   {:port 0 :worker-threads 1})
+        client (wire/connect (:port server))]
+    (try
+      (wire/send! client "GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n")
+      (equal! :handler-entered true (deref entered 5000 false))
+      (native/begin-drain! (:native server))
+      (let [stopped (future (adapter/stop-server server))]
+        (deliver release true)
+        (equal! :drain-response "drained" (wire/text (wire/response! client)))
+        (equal! :drain-completed nil (deref stopped 5000 ::timeout)))
+      (finally
+        (deliver release true)
+        (wire/close! client)
+        (adapter/stop-server server)))))
+
+(defn run-smoke! []
   (request-and-swap!)
   (direct-fiber!)
   (deadline!)
+  (failure-and-byte-budget!)
+  (graceful-drain!)
   (println "all passed: Ring HTTP request mapping, handler swap, executor and deadline"))

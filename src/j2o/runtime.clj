@@ -7,11 +7,11 @@
             [jolt.fibers :as fib]
             [jolt.io-poller :as poller]))
 
-(defn- failure-response [server req error kind]
+(defn- failure-response [server job error kind]
   (let [hook (:on-failure server)
-        annotated (assoc req :ring-chez/failure {:kind kind})]
-    (or (when hook
-          (let [result (try (hook annotated error) (catch Throwable _ nil))]
+        annotated (assoc (:request job) :ring-chez/failure {:kind kind})]
+    (or (when (and hook (compare-and-set! (:failure-called job) false true))
+          (let [result (try ((if (var? hook) @hook hook) annotated error) (catch Throwable _ nil))]
             (when (and (map? result) (contains? result :status)) result)))
         (if (= kind :timeout)
           {:status 503 :headers {"Content-Type" "text/plain"} :body "Service Unavailable"}
@@ -54,7 +54,7 @@
             (when (and @(:alive server) (not @(:retired job)))
               (submit-command! server job
                 (response/create! (:id job)
-                  (failure-response server (:request job) error :crash)))))))
+                  (failure-response server job error :crash)))))))
       (native/response-release! command))))
 
 (defn- run-handler! [server job]
@@ -69,7 +69,7 @@
       (catch Throwable error
         (when-not (or @(:terminal job) @(:retired job))
           (let [kind (if (= :ring-chez/nil-response (:type (ex-data error))) :nil-response :crash)]
-            (try (reply! server job (failure-response server (:request job) error kind))
+            (try (reply! server job (failure-response server job error kind))
                  (catch Throwable _
                    (reply! server job {:status 500 :body "Internal Server Error"})))))))))
 
@@ -83,7 +83,7 @@
   (let [id (native/event-id event)
         key (vec id)
         job {:id id :terminal (atom false) :retired (atom false) :timer (atom nil)
-             :task (atom nil)
+             :task (atom nil) :failure-called (atom false)
              :request (request/from-event event (:port server) (:host server))}]
     (swap! (:requests server) assoc key job)
     (when (pos? (:timeout-ms server))
@@ -93,7 +93,10 @@
             (Thread/sleep (:timeout-ms server))
             (when-not (or @(:terminal job) @(:retired job))
               (let [error (ex-info "handler deadline" {:type :ring-chez/handler-timeout})]
-                (reply! server job (failure-response server (:request job) error :timeout))))))))
+                (try (reply! server job (failure-response server job error :timeout))
+                     (catch Throwable _
+                       (when-not (or @(:terminal job) @(:retired job))
+                         (reply! server job {:status 503 :body "Service Unavailable"}))))))))))
     (if (:handler-on-fiber server)
       (reset! (:task job) (launch! server #(run-handler! server job)))
       (when-not (async/offer! (:work server) job)
@@ -183,19 +186,24 @@
       (reset! (:alive server) false)
       (reset! (:running server) false)
       (poller/cancel! (:fd server))
-      (async/close! (:work server))
-      (doseq [[_ job] @(:requests server)]
-        (reset! (:retired job) true)
-        (reset! (:terminal job) true))
-      (doseq [task @(:fibers server)]
-        (when-not (identical? task (:dispatch server))
-          (fib/kill! task (ex-info "server stopped" {:kind :stopped}))))
-      (let [deadline (+ (System/currentTimeMillis) 5000)]
-        (doseq [task (conj @(:fibers server) (:dispatch server))]
-          (let [result (try (fib/join task (max 0 (- deadline (System/currentTimeMillis))) ::timeout)
-                            (catch Throwable _ ::finished))]
-            (when (= result ::timeout)
-              (throw (ex-info "Fiber did not stop; native state retained" {})))))
+      (let [deadline (+ (System/currentTimeMillis) 5000)
+            dispatch-result (try (fib/join (:dispatch server) 5000 ::timeout)
+                                 (catch Throwable _ ::finished))]
+        (when (= dispatch-result ::timeout)
+          (throw (ex-info "Dispatcher did not stop; native state retained" {})))
+        ;; The dispatcher can no longer create tasks after this point.
+        (async/close! (:work server))
+        (doseq [[_ job] @(:requests server)]
+          (reset! (:retired job) true)
+          (reset! (:terminal job) true))
+        (let [tasks @(:fibers server)]
+          (doseq [task tasks]
+            (fib/kill! task (ex-info "server stopped" {:kind :stopped})))
+          (doseq [task tasks]
+            (let [result (try (fib/join task (max 0 (- deadline (System/currentTimeMillis))) ::timeout)
+                              (catch Throwable _ ::finished))]
+              (when (= result ::timeout)
+                (throw (ex-info "Fiber did not stop; native state retained" {}))))))
         (doseq [worker (:workers server)]
           (.join worker (max 1 (- deadline (System/currentTimeMillis))))
           (when (.isAlive worker)

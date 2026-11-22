@@ -269,14 +269,15 @@ static void process_responses(j2o_server *server)
             if (request != NULL) {
                 slot->claimed = 1;
                 request->res.status = response->status; request->res.reason = "Response";
-                request->res.content_length = response->length;
+                int bodyless = response->status < 200 || response->status == 204 || response->status == 304;
+                request->res.content_length = response->status < 200 || response->status == 204 ? SIZE_MAX : response->length;
                 for (size_t i = 0; i < response->header_count; ++i) {
                     response_header *h = response->headers + i;
                     h2o_iovec_t name = h2o_strdup(&request->pool, h->name, h->name_len);
                     h2o_iovec_t value = h2o_strdup(&request->pool, h->value, h->value_len);
                     h2o_add_header_by_str(&request->pool, &request->res.headers, name.base, name.len, 1, NULL, value.base, value.len);
                 }
-                h2o_send_inline(request, response->body, response->length);
+                h2o_send_inline(request, response->body, bodyless ? 0 : response->length);
             }
         }
         j2o_response_release(response); response = next;

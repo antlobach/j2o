@@ -165,9 +165,10 @@ int main(void)
     j2o_event_id(event, &old);
     j2o_event_release(event);
     send_response(server, old, 200, "first");
+    send_response(server, old, 200, "duplicate");
     char wire[4096];
     read_response(client, wire, sizeof(wire));
-    assert(strstr(wire, "200") != NULL && strstr(wire, "first") != NULL);
+    assert(strstr(wire, "200") != NULL && strstr(wire, "first") != NULL && strstr(wire, "duplicate") == NULL);
     close(client);
     event = next_event(server);
     assert(j2o_event_kind(event) == 2);

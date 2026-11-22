@@ -62,20 +62,23 @@
                        (catch clojure.lang.ExceptionInfo secondary
                          (if (= 1 (:result (ex-data secondary)))
                            (submit-command! server job (response/create! (:id job) fallback))
-                           (throw secondary))))))))))
-      (native/response-release! command))))
+                           (throw secondary)))))))))
+        true)
+      (do (native/response-release! command) false))))
 
 (defn- run-handler! [server job]
   (when-not (or @(:terminal job) @(:retired job))
     (try
       (let [target @(:handler server)
             handler (if (var? target) @target target)
-            value (handler (:request job))]
+            value (if (:handler-on-fiber server)
+                    (handler (:request job))
+                    (jolt.host/run-interruptible (:interrupt job) #(handler (:request job))))]
         (when-not (map? value)
           (throw (ex-info "handler returned nil or a non-map" {:type :ring-chez/nil-response})))
         (reply! server job value))
       (catch Throwable error
-        (when-not (or @(:terminal job) @(:retired job))
+        (when-not (or (:jolt/interrupted (ex-data error)) @(:terminal job) @(:retired job))
           (let [kind (if (= :ring-chez/nil-response (:type (ex-data error))) :nil-response :crash)]
             (try (reply! server job (failure-response server job error kind))
                  (catch Throwable _
@@ -91,7 +94,7 @@
   (let [id (native/event-id event)
         key (vec id)
         job {:id id :terminal (atom false) :retired (atom false) :timer (atom nil)
-             :task (atom nil) :failure-called (atom false)
+             :task (atom nil) :failure-called (atom false) :interrupt (jolt.host/make-interrupt)
              :request (request/from-event event (:port server) (:host server))}]
     (swap! (:requests server) assoc key job)
     (when (pos? (:timeout-ms server))
@@ -101,10 +104,11 @@
             (Thread/sleep (:timeout-ms server))
             (when-not (or @(:terminal job) @(:retired job))
               (let [error (ex-info "handler deadline" {:type :ring-chez/handler-timeout})]
-                (try (reply! server job (failure-response server job error :timeout))
-                     (catch Throwable _
-                       (when-not (or @(:terminal job) @(:retired job))
-                         (reply! server job {:status 503 :body "Service Unavailable"}))))))))))
+                (let [won (try (reply! server job (failure-response server job error :timeout))
+                               (catch Throwable _
+                                 (when-not (or @(:terminal job) @(:retired job))
+                                   (reply! server job {:status 503 :body "Service Unavailable"}))))]
+                  (when won (jolt.host/interrupt! (:interrupt job))))))))))
     (if (:handler-on-fiber server)
       (reset! (:task job) (launch! server #(run-handler! server job)))
       (when-not (async/offer! (:work server) job)
@@ -117,6 +121,7 @@
       (reset! (:retired job) true)
       (reset! (:terminal job) true)
       (cancel-timer! job)
+      (jolt.host/interrupt! (:interrupt job))
       (when-let [task @(:task job)]
         (fib/kill! task (ex-info "request retired" {:kind :retired})))
       (swap! (:requests server) dissoc key))))
@@ -225,7 +230,8 @@
         (async/close! (:work server))
         (doseq [[_ job] @(:requests server)]
           (reset! (:retired job) true)
-          (reset! (:terminal job) true))
+          (reset! (:terminal job) true)
+          (jolt.host/interrupt! (:interrupt job)))
         (let [tasks @(:fibers server)]
           (doseq [task tasks]
             (fib/kill! task (ex-info "server stopped" {:kind :stopped})))

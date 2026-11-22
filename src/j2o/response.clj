@@ -1,6 +1,7 @@
 (ns j2o.response
   "Owned native response construction for unary Ring bodies."
-  (:require [j2o.native :as native]))
+  (:require [clojure.string :as str]
+            [j2o.native :as native]))
 
 (defn- body-bytes [body]
   (cond
@@ -8,6 +9,9 @@
     (string? body) (.getBytes body "UTF-8")
     (bytes? body) body
     :else (throw (ex-info "Unsupported unary response body" {:body body}))))
+
+(defn- header-safe? [value]
+  (not (or (str/includes? value "\r") (str/includes? value "\n"))))
 
 (defn create! [id response]
   (when-not (map? response)
@@ -20,8 +24,11 @@
       (try
         (doseq [[key value] (:headers response)]
           (let [header (if (keyword? key) (name key) (str key))]
-            (doseq [item (if (vector? value) value [value])]
-              (native/response-header! command header (str item)))))
+            (when (header-safe? header)
+              (doseq [item (if (vector? value) value [value])
+                      :let [text (str item)]
+                      :when (header-safe? text)]
+                (native/response-header! command header text)))))
         (vreset! complete true)
         command
         (finally

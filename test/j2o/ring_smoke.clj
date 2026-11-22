@@ -2,6 +2,7 @@
   (:require [j2o.experiments.wire :as wire]
             [j2o.native :as native]
             [jolt.fibers :as fib]
+            [jolt.scheme :as scheme]
             [ring-chez.adapter :as adapter]))
 
 (defn- equal! [label expected actual]
@@ -60,14 +61,39 @@
       (finally (adapter/stop-server server)))))
 
 (defn- deadline! []
-  (let [release (promise)
-        server (adapter/run-server (fn [_] @release {:status 200 :body "late"})
-                                   {:port 0 :worker-threads 1 :handler-timeout-ms 10})]
+  (let [release (promise) entered (promise) finished (promise)
+        server (adapter/run-server (fn [_] (deliver entered true)
+                                     (try @release {:status 200 :body "late"}
+                                          (finally (deliver finished true))))
+                                   {:port 0 :worker-threads 1 :handler-timeout-ms 100})
+        client (wire/connect (:port server))]
     (try
-      (let [result (wire/request! (:port server) "/")]
+      (wire/send! client "GET / HTTP/1.1\r\nHost: example.test\r\n\r\n")
+      (equal! :deadline-handler-entered true (deref entered 5000 false))
+      (let [result (wire/response! client)]
         (equal! :deadline-status 503 (:status result))
         (equal! :deadline-body "Service Unavailable" (wire/text result)))
-      (finally (deliver release true) (adapter/stop-server server)))))
+      (deliver release true)
+      (equal! :late-handler-finished true (deref finished 5000 false))
+      (adapter/swap-handler! server (fn [_] {:status 200 :body "next"}))
+      (wire/send! client "GET /next HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n")
+      (equal! :late-response-isolated "next" (wire/text (wire/response! client)))
+      (finally (deliver release true) (wire/close! client) (adapter/stop-server server)))))
+
+(defn- compute-deadline! []
+  (let [entered (promise) finished (promise) stop (atom false)
+        server (adapter/run-server
+                 (fn [_] (deliver entered true)
+                   (try (loop [] (when-not @stop (recur))) {:status 200 :body "late"}
+                        (finally (deliver finished true))))
+                 {:port 0 :worker-threads 1 :handler-timeout-ms 100})
+        client (wire/connect (:port server))]
+    (try
+      (wire/send! client "GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n")
+      (equal! :compute-handler-entered true (deref entered 5000 false))
+      (equal! :compute-deadline 503 (:status (wire/response! client)))
+      (equal! :interrupted-finally true (deref finished 5000 false))
+      (finally (reset! stop true) (wire/close! client) (adapter/stop-server server)))))
 
 (defn- failure-and-byte-budget! []
   (let [calls (atom 0)
@@ -92,6 +118,38 @@
       (let [result (wire/request! (:port server) "/")]
         (equal! :oversized-hook-fallback 500 (:status result))
         (equal! :oversized-hook-once 1 @calls))
+      (finally (adapter/stop-server server)))))
+
+(defn- unsafe-response-header! []
+  (let [server (adapter/run-server
+                 (fn [_] {:status 200 :headers {"X-Safe" "ok"
+                                                "X-Unsafe" "value\r\nX-Injected: yes"
+                                                "Content-Length" "999"}
+                          :body "safe"})
+                 {:port 0 :worker-threads 1})]
+    (try
+      (let [result (wire/request! (:port server) "/")]
+        (equal! :safe-header "ok" (get-in result [:headers "x-safe"]))
+        (equal! :unsafe-header-dropped nil (get-in result [:headers "x-unsafe"]))
+        (equal! :injected-header-absent nil (get-in result [:headers "x-injected"]))
+        (equal! :framing-owned-by-transport "4" (get-in result [:headers "content-length"]))
+        (equal! :safe-body "safe" (wire/text result)))
+      (finally (adapter/stop-server server)))))
+
+(defn- gc-request-body! []
+  (let [collect! (scheme/eval-string "(lambda () (let ([n (collections)]) (collect-rendezvous) (- (collections) n)))")
+        collected (atom 0)
+        server (adapter/run-server
+                 (fn [request]
+                   (let [body (.readAllBytes (:body request))]
+                     (reset! collected (collect!))
+                     {:status 200 :body body}))
+                 {:port 0 :worker-threads 1})
+        body (byte-array [0 1 -1 -128 42])]
+    (try
+      (equal! :binary-body-through-gc (vec body)
+              (vec (:body (wire/request! (:port server) "POST" "/" body))))
+      (equal! :collection-progress true (pos? @collected))
       (finally (adapter/stop-server server)))))
 
 (defn- graceful-drain! []
@@ -121,7 +179,10 @@
   (var-redefinition!)
   (direct-fiber!)
   (deadline!)
+  (compute-deadline!)
   (oversized-failure-hook!)
   (failure-and-byte-budget!)
+  (unsafe-response-header!)
+  (gc-request-body!)
   (graceful-drain!)
   (println "all passed: Ring HTTP request mapping, handler swap, executor and deadline"))

@@ -40,6 +40,7 @@ typedef struct {
 typedef struct {
     h2o_multithread_message_t super;
     uint64_t id;
+    uint64_t preparation_enter_ns;
     size_t len;
     int status;
     profile_trace *trace;
@@ -554,7 +555,7 @@ void j2o_probe_release(probe_server *server, request_packet *packet)
 
 response_message *j2o_probe_response_create(uint64_t id, int status, const char *body, size_t len, profile_trace *trace)
 {
-    profile_stamp(trace, P_SUBMIT_ENTER, 0, 0);
+    uint64_t preparation_enter_ns = trace == NULL ? 0 : profile_now();
     if (len > MAX_RESPONSE || status < 200 || status > 599 || (len != 0 && body == NULL)) return NULL;
     response_message *message = malloc(sizeof(*message) + len);
     if (message == NULL) return NULL;
@@ -563,6 +564,7 @@ response_message *j2o_probe_response_create(uint64_t id, int status, const char 
     message->status = status;
     message->len = len;
     message->trace = trace;
+    message->preparation_enter_ns = preparation_enter_ns;
     if (len != 0) memcpy(message->body, body, len);
     return message;
 }
@@ -572,6 +574,7 @@ int j2o_probe_response_submit(probe_server *server, response_message *message)
 {
     if (atomic_load(&server->stopping)) return -1;
     if (message->trace != NULL) message->trace->data[PROFILE_RESPONSE_BYTES] = sizeof(*message) + message->len;
+    profile_stamp_at(message->trace, P_SUBMIT_ENTER, 0, 0, message->preparation_enter_ns);
     profile_stamp(message->trace, P_RESPONSE_QUEUED, 0, 0);
     h2o_multithread_send_message(&server->receiver, &message->super);
     return 0;

@@ -109,9 +109,47 @@ static void *idle_waiter(void *data)
     return NULL;
 }
 
+enum { TRACE_RACE_COUNT = 4096 };
+typedef struct {
+    _Atomic unsigned ready;
+    _Atomic int go;
+    profile_trace traces[TRACE_RACE_COUNT];
+} trace_race;
+
+static void *race_trace_writer(void *data)
+{
+    trace_race *race = data;
+    atomic_fetch_add(&race->ready, 1);
+    while (!atomic_load(&race->go)) {}
+    for (size_t i = 0; i < TRACE_RACE_COUNT; ++i)
+        profile_stamp(race->traces + i, P_ARRIVAL, 123, 456);
+    return NULL;
+}
+
+static void competing_trace_publication(void)
+{
+    trace_race *race = calloc(1, sizeof(*race));
+    assert(race != NULL);
+    pthread_t writers[2];
+    for (size_t i = 0; i < 2; ++i)
+        assert(pthread_create(writers + i, NULL, race_trace_writer, race) == 0);
+    while (atomic_load(&race->ready) != 2) {}
+    atomic_store(&race->go, 1);
+    for (size_t i = 0; i < 2; ++i) assert(pthread_join(writers[i], NULL) == 0);
+    for (size_t i = 0; i < TRACE_RACE_COUNT; ++i) {
+        profile_trace *trace = race->traces + i;
+        assert(atomic_load(&trace->seen) == (PROFILE_INVALID | 1));
+        assert(trace->data[1 + P_ARRIVAL] != 0);
+        assert(trace->data[1 + P_STAGE_COUNT + P_ARRIVAL] == 123);
+        assert(trace->data[1 + P_STAGE_COUNT * 2 + P_ARRIVAL] == 456);
+    }
+    free(race);
+}
+
 int main(void)
 {
     queued_readiness();
+    competing_trace_publication();
     unsigned char payload[MAX_BODY + 1], result[MAX_BODY];
     for (size_t i = 0; i < sizeof(payload); ++i) payload[i] = (unsigned char)i;
     for (int round = 0; round < 10; ++round) {

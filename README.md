@@ -58,7 +58,7 @@ H2O's protocol behavior is the baseline; matching the older adapter's rejection 
 
 ## Performance
 
-The `Experiments` GitHub Actions workflow runs correctness gates first, then benchmarks unmodified H2O and the experimental Jolt bridge with validated identical response bytes. It saves environment metadata, raw wrk output, throughput, p50/p95/p99 latency, thread counts, and RSS. The benchmark refuses to run outside Linux GitHub Actions.
+PR and main-branch updates run correctness and safety checks, **not benchmarks**. Performance runs are manual-only at stable milestones: dispatch `Experiments` with `benchmarks=true` for bridge benchmarks/profiles, or dispatch `Native H2O versus ring-chez` for the direct stock-server comparison. The former runs correctness gates before measuring and saves environment metadata, raw wrk output, throughput, p50/p95/p99 latency, thread counts, and RSS. Performance workloads refuse to run outside Linux GitHub Actions.
 
 The native static-file server is a transport ceiling, not an equivalent Ring application. Shared-runner results characterize this experiment; they are not a production performance guarantee.
 

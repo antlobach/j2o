@@ -1,11 +1,6 @@
 name: Native H2O versus ring-chez
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'experiments/ring_comparison*'
-      - '.github/workflows/ring-comparison.yml'
   workflow_dispatch:
 
 permissions:

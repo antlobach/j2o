@@ -104,7 +104,7 @@ HTTP/3 is a separate scope decision, not required for ring-chez feature parity.
 
 ## Performance methodology
 
-Only the GitHub `Experiments` workflow runs performance measurements. It first runs correctness, explicit GC positive/negative controls, real native-reference comparisons, HTTP/2, and native sanitizer checks.
+Performance measurements run only on GitHub-hosted runners and require an explicit manual dispatch at a stable milestone. PR/main updates run correctness and safety checks without benchmarks or performance profiles. Dispatch `Experiments` with `benchmarks=true` for the experimental bridge qualification; dispatch `Native H2O versus ring-chez` for the stock-server comparison. Correctness, explicit GC positive/negative controls, native-reference comparisons, HTTP/2, and sanitizer gates precede bridge measurements.
 
 Measure the external unmodified H2O static-file server versus a separate Jolt bridge process. Both return exactly `Hello, World!\n`. Validate status and body on every load-generator response. Save raw output, runner/CPU/kernel/compiler/runtime versions, commit, throughput, p50/p95/p99 latency, process thread count, and RSS. Use one H2O I/O thread, one j2o I/O thread plus one carrier, concurrency 1/16/64, warmup before every sample, three samples, and alternating server order.
 

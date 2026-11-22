@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      benchmarks:
+        description: Run benchmarks and performance profiles for a stable milestone
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -75,10 +81,13 @@ jobs:
       - name: Native address and undefined-behavior sanitizers
         run: CC=clang bash experiments/native_safety.sh
       - name: Runner-only performance comparison
+        if: github.event_name == 'workflow_dispatch' && inputs.benchmarks
         run: jolt -m j2o.experiments.bench
       - name: Runner-only single-request stage, allocation, and CPU profiles
+        if: github.event_name == 'workflow_dispatch' && inputs.benchmarks
         run: jolt -m j2o.experiments.profile-run
       - name: Paired ingress, scratch, scheduler, and FFI investigation
+        if: github.event_name == 'workflow_dispatch' && inputs.benchmarks
         run: |
           jolt -m j2o.experiments.tuning-run
           jolt -m j2o.experiments.tuning-report

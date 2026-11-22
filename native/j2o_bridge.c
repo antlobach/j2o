@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
@@ -104,6 +105,30 @@ static j2o_result invalid(j2o_error *error, const char *key, const char *given, 
 
 struct j2o_config { char *host; uint64_t values[15]; int reuse_port; };
 typedef struct { int fd; h2o_socket_t *socket; struct sockaddr_storage address; socklen_t length; } listener;
+typedef struct j2o_connection j2o_connection;
+typedef struct { h2o_req_t *request; uint64_t generation; j2o_event *retired; int claimed; } request_slot;
+typedef struct { char *name; size_t name_len; char *value; size_t value_len; } response_header;
+struct j2o_event {
+    struct j2o_event *next;
+    j2o_id id;
+    unsigned kind;
+    int version;
+    size_t headers;
+    h2o_iovec_t *fields;
+};
+struct j2o_response {
+    struct j2o_response *next;
+    j2o_id id;
+    int status;
+    size_t length, header_count, header_capacity, bytes;
+    response_header *headers;
+    char body[];
+};
+struct j2o_connection {
+    j2o_connection *next, **previous;
+    j2o_server *server;
+    h2o_socket_t *socket;
+};
 typedef enum { NEW, BINDING, RUNNING, DRAINING, FORCING, JOINED, DESTROYED } server_state;
 struct j2o_server {
     pthread_mutex_t mutex;
@@ -120,6 +145,17 @@ struct j2o_server {
     h2o_globalconf_t h2o_config;
     h2o_context_t context;
     h2o_socket_t *control_socket;
+    h2o_accept_ctx_t accept;
+    j2o_connection *connections;
+    _Atomic size_t connection_count;
+    request_slot *slots;
+    size_t slot_count;
+    _Atomic size_t live_requests;
+    _Atomic uint64_t total_requests;
+    j2o_event *event_head, *event_tail;
+    size_t event_count;
+    j2o_response *response_head, *response_tail;
+    size_t response_count, response_bytes;
 };
 
 uint32_t j2o_abi_version(void) { return J2O_ABI_VERSION; }
@@ -306,14 +342,24 @@ static j2o_result bind_listeners(j2o_server *server, j2o_error *error)
     return os_failure(error, EADDRINUSE, "bind");
 }
 
+#include "j2o_unary.inc"
+
 static void close_adopted(h2o_socket_t **socket)
 {
     if (*socket != NULL) { h2o_socket_close(*socket); *socket = NULL; COUNT(test_fds, (size_t)-1); }
 }
 static void control_ready(h2o_socket_t *socket, const char *error)
 {
-    (void)error;
-    if (socket->input != NULL) h2o_buffer_consume(&socket->input, socket->input->size);
+    j2o_server *server = socket->data;
+    if (error != NULL) { atomic_store(&server->state, FORCING); return; }
+    char buffer[256];
+    ssize_t result;
+    do {
+        result = read(server->control[0], buffer, sizeof(buffer));
+    } while (result > 0 || (result < 0 && errno == EINTR));
+    if (result == 0 || (result < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
+        atomic_store(&server->state, FORCING);
+    process_responses(server);
 }
 static void publish_start(j2o_server *server)
 {
@@ -332,9 +378,15 @@ static void *server_loop(void *data)
     server->h2o_config.http1.req_timeout = server->config.values[J2O_REQUEST_TIMEOUT_MS];
     server->h2o_config.http2.idle_timeout = server->config.values[J2O_KEEPALIVE_TIMEOUT_MS];
     server->h2o_config.handshake_timeout = server->config.values[J2O_HANDSHAKE_TIMEOUT_MS];
-    h2o_config_register_host(&server->h2o_config, h2o_iovec_init(H2O_STRLIT("default")), 65535);
+    h2o_hostconf_t *host = h2o_config_register_host(&server->h2o_config, h2o_iovec_init(H2O_STRLIT("default")), 65535);
+    h2o_pathconf_t *path = h2o_config_register_path(host, "/", 0);
+    unary_handler *handler = (unary_handler *)h2o_create_handler(path, sizeof(*handler));
+    handler->super.on_req = on_unary_request;
+    handler->server = server;
     h2o_loop_t *loop = h2o_evloop_create();
     h2o_context_init(&server->context, loop, &server->h2o_config);
+    server->accept.ctx = &server->context;
+    server->accept.hosts = server->h2o_config.hosts;
     int control_fd = -1;
     if (checkpoint()) os_failure(&server->startup_error, EIO, "fcntl");
     else {
@@ -344,18 +396,34 @@ static void *server_loop(void *data)
     }
     if (control_fd >= 0) {
         server->control_socket = h2o_evloop_socket_create(loop, control_fd, H2O_SOCKET_FLAG_DONT_READ);
+        server->control_socket->data = server;
         h2o_socket_read_start(server->control_socket, control_ready);
         for (size_t i = 0; i < server->listener_count; ++i) {
             if (checkpoint()) { os_failure(&server->startup_error, EIO, "adopt-listener"); break; }
             listener *item = server->listeners + i;
             item->socket = h2o_evloop_socket_create(loop, item->fd, H2O_SOCKET_FLAG_DONT_READ);
             item->fd = -1;
-            /* Internal lifecycle slice: bound/adopted, but no accept/request path. */
+            item->socket->data = server;
+            h2o_socket_read_start(item->socket, accept_unary);
         }
     }
     publish_start(server);
+    int draining = 0, sockets_shutdown = 0;
     if (server->startup_error.result == J2O_OK) {
-        while (atomic_load(&server->state) == RUNNING) {
+        for (;;) {
+            int state = atomic_load(&server->state);
+            if (state != RUNNING && !draining) {
+                for (size_t i = 0; i < server->listener_count; ++i) close_adopted(&server->listeners[i].socket);
+                close_raw_listeners(server);
+                h2o_context_request_shutdown(&server->context);
+                draining = 1;
+            }
+            if (state == FORCING && !sockets_shutdown) {
+                for (j2o_connection *item = server->connections; item != NULL; item = item->next)
+                    shutdown(h2o_socket_get_fd(item->socket), SHUT_RDWR);
+                sockets_shutdown = 1;
+            }
+            if (draining && server->connection_count == 0) break;
             uint32_t delay = h2o_cleanup_thread(h2o_now(loop), &server->context);
             int result;
 #ifdef J2O_TESTING
@@ -363,20 +431,21 @@ static void *server_loop(void *data)
             else
 #endif
                 result = h2o_evloop_run(loop, delay > INT32_MAX ? INT32_MAX : (int32_t)delay);
-            if (result != 0 && errno != EINTR) {
-                atomic_store(&server->state, FORCING);
-                break;
-            }
+            if (result != 0 && errno != EINTR) atomic_store(&server->state, FORCING);
         }
     }
     for (size_t i = 0; i < server->listener_count; ++i) close_adopted(&server->listeners[i].socket);
     close_raw_listeners(server);
-    h2o_context_request_shutdown(&server->context);
+    if (!draining) h2o_context_request_shutdown(&server->context);
+    process_responses(server);
     close_adopted(&server->control_socket);
     h2o_context_dispose(&server->context);
     h2o_evloop_destroy(loop);
     h2o_config_dispose(&server->h2o_config);
-    h2o_cleanup_thread(0, NULL);
+    /* h2o_cleanup_thread(0) is gated by its periodic deadline after traffic. */
+    h2o_buffer_clear_recycle(1);
+    h2o_socket_clear_recycle(1);
+    h2o_mem_clear_recycle(&h2o_mem_pool_allocator, 1);
     pthread_mutex_lock(&server->mutex);
     server->loop_done = 1;
     pthread_cond_broadcast(&server->changed);
@@ -388,6 +457,16 @@ static void release_server(j2o_server *server)
     close_raw_listeners(server);
     close_fd(&server->control[0]); close_fd(&server->control[1]);
     close_fd(&server->events[0]); close_fd(&server->events[1]);
+    while (server->event_head != NULL) {
+        j2o_event *next = server->event_head->next;
+        j2o_event_release(server->event_head); server->event_head = next;
+    }
+    while (server->response_head != NULL) {
+        j2o_response *next = server->response_head->next;
+        j2o_response_release(server->response_head); server->response_head = next;
+    }
+    for (size_t i = 0; i < server->slot_count; ++i) j2o_event_release(server->slots[i].retired);
+    deallocate(server->slots);
     deallocate(server->listeners); deallocate(server->config.host);
     if (server->cond_ready) pthread_cond_destroy(&server->changed);
     if (server->mutex_ready) pthread_mutex_destroy(&server->mutex);
@@ -407,6 +486,13 @@ j2o_result j2o_server_start(const j2o_config *config, j2o_server **out, j2o_erro
     server->config.host = allocate(strlen(config->host) + 1);
     if (server->config.host == NULL) { no_memory(error); goto failed; }
     memcpy(server->config.host, config->host, strlen(config->host) + 1);
+    if (config->values[J2O_MAX_LIVE_REQUESTS] > UINT32_MAX ||
+        config->values[J2O_MAX_LIVE_REQUESTS] > SIZE_MAX / sizeof(*server->slots)) {
+        invalid(error, "max-live-requests", NULL, "Request slot limit is too large"); goto failed;
+    }
+    server->slots = allocate((size_t)config->values[J2O_MAX_LIVE_REQUESTS] * sizeof(*server->slots));
+    if (server->slots == NULL) { no_memory(error); goto failed; }
+    server->slot_count = (size_t)config->values[J2O_MAX_LIVE_REQUESTS];
     int code;
     if (checkpoint()) { os_failure(error, EIO, "pthread_mutex_init"); goto failed; }
     if ((code = pthread_mutex_init(&server->mutex, NULL)) != 0) { os_failure(error, code, "pthread_mutex_init"); goto failed; }

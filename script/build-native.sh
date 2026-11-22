@@ -44,4 +44,4 @@ fi
   "$root/native/j2o_bridge.c" -L"$build_dir" -lh2o-evloop -Wl,-rpath,"$build_dir" \
   -L"$openssl_root/lib" -lssl -lcrypto "${links[@]}" \
   -o "$root/.cache/native/libj2o_bridge.$extension"
-printf 'Built development ABI 0x80000001 against external H2O %s\n' "$revision"
+printf 'Built development ABI 0x80000002 against external H2O %s\n' "$revision"

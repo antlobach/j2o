@@ -142,7 +142,7 @@ jobs:
           if-no-files-found: warn
 
   specification:
-    name: Allium lifecycle structure
+    name: Allium lifecycle and unary structure
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
@@ -155,13 +155,15 @@ jobs:
           mkdir -p "$HOME/.local/bin"
           tar -xzf "$RUNNER_TEMP/allium.tar.gz" -C "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Check, analyse and derive lifecycle obligations
+      - name: Check, analyse and derive specification obligations
         run: |
           set -euo pipefail
           mkdir -p .cache/allium
           allium --version
-          for command in check analyse plan model; do
-            allium "$command" spec/native-lifecycle.allium | tee ".cache/allium/$command.json"
+          for spec in native-lifecycle unary; do
+            for command in check analyse plan model; do
+              allium "$command" "spec/$spec.allium" | tee ".cache/allium/$spec-$command.json"
+            done
           done
       - name: Save specification evidence
         if: always()

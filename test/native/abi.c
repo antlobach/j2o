@@ -29,7 +29,7 @@ _Static_assert(J2O_OK == 0 && J2O_INVALID == 1 && J2O_NOMEM == 2 && J2O_OS == 3 
 
 int main(void)
 {
-    assert(j2o_abi_version() == UINT32_C(0x80000001));
+    assert(j2o_abi_version() == UINT32_C(0x80000002));
     j2o_error error, zero = {0};
     memset(&error, 0xa5, sizeof(error));
     j2o_config *config = j2o_config_create(&error);

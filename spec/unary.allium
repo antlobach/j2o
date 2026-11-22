@@ -1,0 +1,104 @@
+-- allium: 3
+-- Unary Ring request/response behavior. Streaming, TLS and upgrades have
+-- separate contracts; the native owner never executes application code.
+
+contract RequestBoundary {
+    @invariant RingRequest
+        -- A handler sees method, protocol, scheme, server and numeric peer,
+        -- lowercase comma-coalesced headers, normalized URI, original URI,
+        -- query and byte-faithful request body. Query is absent when missing.
+        -- Authority supplies the Host header if transport parsing consumed it.
+    @invariant ExecutionPolicy
+        -- Handler targets are resolved once at invocation. Functions and Vars
+        -- are accepted; swapping affects later invocations on existing sockets.
+        -- Default and threads handlers run on a server-owned thread executor.
+        -- Direct fiber invocation is opt-in and excludes handler deadlines.
+    @invariant FailurePolicy
+        -- Application failure invokes the failure hook at most once; invalid
+        -- hooks fall back to 500, deadlines to 503. A response is validated
+        -- before it wins a terminal claim. Handler failure is not a server fault.
+}
+
+contract TransportBoundary {
+    @invariant LifetimeAndIsolation
+        -- Requests own their copied data and IDs include loop, slot and a
+        -- generation. A late response cannot reach a later request in a reused
+        -- slot. Retire notifications cancel outstanding managed work.
+        -- Native request objects remain confined to their H2O owner thread.
+    @invariant BoundedResources
+        -- Admission, connections, event and response queues and queued bytes
+        -- are independently bounded. Overload cannot create unbounded work.
+        -- Queue pressure never consumes a response command on failure.
+    @invariant ResponseFraming
+        -- The transport owns Content-Length and Transfer-Encoding. HEAD sends
+        -- no body; 1xx, 204 and 304 send no body. Header names and values cannot
+        -- inject response lines. Repeated values are preserved independently.
+}
+
+entity Application {}
+entity Transport {}
+entity Exchange {
+    status: admitted | claimed | retired
+    generation: Integer
+    terminal_claims: Integer
+    transitions status {
+        admitted -> claimed
+        admitted -> retired
+        claimed -> retired
+        terminal: retired
+    }
+}
+
+rule Admitted {
+    when: RequestAdmitted(generation)
+    ensures: Exchange.created(status: admitted, generation: generation, terminal_claims: 0)
+}
+rule HandlerCompletes {
+    when: HandlerResponse(exchange)
+    requires: exchange.status = admitted
+    ensures: exchange.status = claimed
+    ensures: exchange.terminal_claims = 1
+}
+rule DeadlineWins {
+    when: HandlerDeadline(exchange)
+    requires: exchange.status = admitted
+    ensures: exchange.status = claimed
+    ensures: exchange.terminal_claims = 1
+}
+rule DisconnectBeforeClaim {
+    when: RequestRetired(exchange)
+    requires: exchange.status = admitted
+    ensures: exchange.status = retired
+}
+rule CompletionRetired {
+    when: RequestRetired(exchange)
+    requires: exchange.status = claimed
+    ensures: exchange.status = retired
+}
+
+invariant OneTerminalResponse {
+    for exchange in Exchanges:
+        exchange.terminal_claims <= 1
+}
+
+actor Handler { identified_by: Application }
+actor Owner { identified_by: Transport }
+
+surface UnaryApplication {
+    facing _: Handler
+    context exchange: Exchange
+    provides:
+        HandlerResponse(exchange) when exchange.status = admitted
+    contracts:
+        fulfils RequestBoundary
+}
+surface UnaryTransport {
+    facing _: Owner
+    context exchange: Exchange
+    provides:
+        RequestAdmitted(generation)
+        HandlerDeadline(exchange) when exchange.status = admitted
+        RequestRetired(exchange) when exchange.status in {admitted, claimed}
+    contracts:
+        fulfils TransportBoundary
+}

@@ -29,5 +29,9 @@ common=(-std=c11 -D_GNU_SOURCE -Wall -Wextra -Werror -DH2O_USE_LIBUV=0 "${flags[
 "${CC:-cc}" "${common[@]}" "$root/test/native/abi.c" \
   -L"$root/.cache/native" -lj2o_bridge -Wl,-rpath,"$root/.cache/native" \
   -o "$root/.cache/native/abi"
+"${CC:-cc}" "${common[@]}" "$root/test/native/unary.c" \
+  -L"$root/.cache/native" -lj2o_bridge -Wl,-rpath,"$root/.cache/native" \
+  -o "$root/.cache/native/unary"
 "$root/.cache/native/abi"
 "$root/.cache/native/lifecycle"
+"$root/.cache/native/unary"

@@ -1,5 +1,6 @@
 (ns j2o.test-runner
   (:require [j2o.native :as native]
+            [j2o.ring-smoke :as ring-smoke]
             [jolt.ffi :as ffi]))
 
 (defn equal! [label expected actual]
@@ -42,5 +43,6 @@
   (try
     (error-layout!)
     (dotimes [_ 20] (native-smoke!))
+    (ring-smoke/run-smoke!)
     (println "all passed: managed ABI, copied error lifetime and native lifecycle smoke")
     (finally (shutdown-agents))))

@@ -30,17 +30,19 @@
       (preserve! primary #(terminate! process))
       (throw primary))))
 
-(defn read-line! [reader timeout-ms]
-  (let [deadline (+ (System/nanoTime) (* timeout-ms 1000000))
-        text (StringBuilder.)]
-    (loop []
-      (when (>= (System/nanoTime) deadline)
-        (throw (ex-info "Child protocol read exceeded deadline" {:timeout-ms timeout-ms})))
-      (if (.ready reader)
-        (let [value (.read reader)]
-          (cond
-            (= -1 value) (when (pos? (.length text)) (str text))
-            (= 10 value) (str text)
-            (= 13 value) (recur)
-            :else (do (.append text (char value)) (recur))))
-        (do (Thread/sleep 1) (recur))))))
+(defn read-line! [process reader timeout-ms]
+  ;; Jolt 0.8.27 process readers do not report BufferedReader.ready reliably.
+  ;; A timed future is joined after child termination before anyone reuses reader.
+  (let [task (future (.readLine reader))]
+    (try
+      (let [line (deref task timeout-ms ::timeout)]
+        (when (= ::timeout line)
+          (throw (ex-info "Child protocol read exceeded deadline" {:timeout-ms timeout-ms})))
+        line)
+      (catch Throwable primary
+        (preserve! primary
+          #(do
+             (terminate! process)
+             (when (= ::timeout (try (deref task 2000 ::timeout) (catch Throwable _ ::finished)))
+               (throw (ex-info "Child protocol reader did not retire" {:pid (.pid process)})))))
+        (throw primary)))))

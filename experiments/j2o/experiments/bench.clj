@@ -83,7 +83,7 @@
             _ (swap! resources assoc :process process)
             reader (java.io.BufferedReader. (java.io.InputStreamReader. (.getInputStream process)))
             _ (swap! resources assoc :reader reader)
-            ready (child/read-line! reader 15000)]
+            ready (child/read-line! process reader 15000)]
       (when-not (and ready (str/starts-with? ready "READY "))
         (throw (ex-info "Benchmark server did not start" {:output ready})))
       (let [port (Long/parseLong (second (str/split ready #" ")))

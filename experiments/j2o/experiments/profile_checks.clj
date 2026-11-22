@@ -185,16 +185,21 @@
       (finally
         (when (.isAlive process) (child/terminate! process))
         (.delete file))))
-  (let [process (.start (ProcessBuilder. ["sh" "-c" "printf R; exec sleep 60"]))
+  (let [file (java.io.File/createTempFile "j2o-partial-" ".log")
+        builder (ProcessBuilder. ["sh" "-c" "printf R; printf ready >&2; exec sleep 60"])
+        _ (.redirectError builder file)
+        process (.start builder)
         reader (java.io.BufferedReader. (java.io.InputStreamReader. (.getInputStream process)))]
     (try
-      (checks/eventually! :partial-protocol-line-is-ready #(.ready reader))
+      (checks/eventually! :child-wrote-partial-protocol-line #(= "ready" (slurp file)))
       (checks/check! :partial-protocol-line-cannot-hang 20
                      (:timeout-ms (ex-data
-                                    (try (child/read-line! reader 20) nil (catch Throwable t t)))))
+                                    (try (child/read-line! process reader 20) nil (catch Throwable t t)))))
+      (checks/check! :protocol-timeout-retires-child false (.isAlive process))
       (finally
-        (child/terminate! process)
-        (.close reader))))
+        (when (.isAlive process) (child/terminate! process))
+        (.close reader)
+        (.delete file))))
   (let [primary (ex-info "primary" {:kind :load})
         cleanup (ex-info "cleanup" {:kind :stop})
         caught (try (child/preserve! primary #(throw cleanup)) nil (catch Throwable t t))]

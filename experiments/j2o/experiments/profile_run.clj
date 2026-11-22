@@ -5,9 +5,9 @@
             [j2o.experiments.bench :as bench]
             [j2o.experiments.process :as child]))
 
-(defn command! [writer reader command expected]
+(defn command! [process writer reader command expected]
   (.write writer (str command "\n")) (.flush writer)
-  (let [reply (child/read-line! reader 15000)]
+  (let [reply (child/read-line! process reader 15000)]
     (when-not (= expected reply)
       (throw (ex-info "Profiling server protocol failed" {:command command :expected expected :reply reply})))))
 
@@ -66,19 +66,19 @@
         writer (java.io.OutputStreamWriter. (.getOutputStream process))
         primary (atom nil)]
     (try
-      (let [ready (child/read-line! reader 15000)]
+      (let [ready (child/read-line! process reader 15000)]
         (when-not (and ready (str/starts-with? ready "READY "))
           (throw (ex-info "Profiling server did not start" {:mode mode :output ready})))
         (let [port (Long/parseLong (second (str/split ready #" ")))
               _ (bench/sample! label port (.pid process) 1 round true)
-              _ (command! writer reader "calibrate" "CALIBRATED")
-              _ (command! writer reader "begin" "BEGUN")
-              _ (when (= :cpu mode) (command! writer reader "start-cpu" "CPU-STARTED"))
+              _ (command! process writer reader "calibrate" "CALIBRATED")
+              _ (command! process writer reader "begin" "BEGUN")
+              _ (when (= :cpu mode) (command! process writer reader "start-cpu" "CPU-STARTED"))
               load (if (= :idle mode)
                      (do (Thread/sleep 3000) nil)
                      (bench/sample! label port (.pid process) 1 round false))]
-          (when (= :cpu mode) (command! writer reader "stop-cpu" "CPU-STOPPED"))
-          (command! writer reader "end" "ENDED")
+          (when (= :cpu mode) (command! process writer reader "stop-cpu" "CPU-STOPPED"))
+          (command! process writer reader "end" "ENDED")
           (let [result (edn/read-string (slurp (str destination ".edn")))
                 accounting (validate-capture! load result)]
             (when (= :cpu mode)

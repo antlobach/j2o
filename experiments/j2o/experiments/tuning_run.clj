@@ -24,18 +24,18 @@
         writer (java.io.OutputStreamWriter. (.getOutputStream process))
         primary (atom nil)]
     (try
-      (let [ready (child/read-line! reader 15000)]
+      (let [ready (child/read-line! process reader 15000)]
         (when-not (and ready (str/starts-with? ready "READY "))
           (throw (ex-info "Tuning server did not start" {:variant variant :ready ready})))
         (let [port (Long/parseLong (second (str/split ready #" ")))]
           (bench/sample! label port (.pid process) concurrency round true)
-          (profiling/command! writer reader "calibrate" "CALIBRATED")
-          (profiling/command! writer reader "begin" "BEGUN")
-          (when (= :cpu mode) (profiling/command! writer reader "start-cpu" "CPU-STARTED"))
+          (profiling/command! process writer reader "calibrate" "CALIBRATED")
+          (profiling/command! process writer reader "begin" "BEGUN")
+          (when (= :cpu mode) (profiling/command! process writer reader "start-cpu" "CPU-STARTED"))
           (let [load (if (= :idle mode) (do (Thread/sleep 3000) nil)
                        (bench/sample! label port (.pid process) concurrency round false))]
-            (when (= :cpu mode) (profiling/command! writer reader "stop-cpu" "CPU-STOPPED"))
-            (profiling/command! writer reader "end" "ENDED")
+            (when (= :cpu mode) (profiling/command! process writer reader "stop-cpu" "CPU-STOPPED"))
+            (profiling/command! process writer reader "end" "ENDED")
             (let [result (edn/read-string (slurp (str destination ".edn")))
                   accounting (profiling/validate-capture! load result)]
               (when-not (and (zero? (get-in result [:stats :live-packets]))

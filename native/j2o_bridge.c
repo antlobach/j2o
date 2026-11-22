@@ -347,9 +347,16 @@ static void close_adopted(h2o_socket_t **socket)
 }
 static void control_ready(h2o_socket_t *socket, const char *error)
 {
-    (void)error;
-    if (socket->input != NULL) h2o_buffer_consume(&socket->input, socket->input->size);
-    process_responses(socket->data);
+    j2o_server *server = socket->data;
+    if (error != NULL) { atomic_store(&server->state, FORCING); return; }
+    char buffer[256];
+    ssize_t result;
+    do {
+        result = read(server->control[0], buffer, sizeof(buffer));
+    } while (result > 0 || (result < 0 && errno == EINTR));
+    if (result == 0 || (result < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
+        atomic_store(&server->state, FORCING);
+    process_responses(server);
 }
 static void publish_start(j2o_server *server)
 {

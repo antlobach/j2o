@@ -14,6 +14,8 @@ This repository currently contains executable design experiments and an implemen
 - Performance measurements run **only on GitHub runners**, against unmodified H2O from the same pinned revision.
 
 ## Reproduce correctness experiments
+Run the commands below in GitHub Actions, not on the development workstation. Builds, correctness suites, sanitizers, GC probes, stress, and performance workloads are remote-only for this project.
+
 
 Requires Jolt **v0.8.27**, Git, a C11 compiler, CMake, pkg-config, OpenSSL 3, zlib, and an HTTP/2-enabled curl. macOS uses Homebrew `openssl@3`; Linux uses the installed development libraries. `OPENSSL_ROOT_DIR` can override discovery.
 
@@ -53,5 +55,11 @@ The native static-file server is a transport ceiling, not an equivalent Ring app
 The workflow also profiles single-request latency in fresh server processes with profiling off, sampled stage timing, sampled allocation counters, and CPU sampling. GC stays enabled in every mode. It records observer calibration and an idle allocation control. Timing and allocation collection are separate from the CPU-sampling run; all modes retain response validation. Stage records are native-owned, capped, and exported only after completion. Queue intervals include wakeup and scheduling; `h2o_send_inline` returning does not mean bytes have reached the client.
 
 Profiling preserves both load-generator completions and server admissions: wrk can stop with one unreported reply per non-pipelined connection. Windows wait for closed connections and settled native/fiber work; only a final transport-stale trace may be incomplete. Allocation snapshots combine live and reclaimed bytes within one GC epoch, and process CPU is reported separately from the controller thread's CPU.
+
+The paired ingress investigation separates HTTP qualification windows (five unique rounds at concurrency 1/16/64) from profiling windows (three unique rounds per variant/mode at concurrency 1, each round including profiling off). The reducer rejects missing/duplicated windows, failed response validation, missing captures, and retained native work. It exports raw paired ratios, throughput/p99 win counts, and exact deterministic paired-bootstrap 95% intervals over all \(5^5\) paired resamples.
+
+CPU sampling starts immediately before measured load and stops before quiescence/export. Timing, allocation, CPU, and observer calibration remain observer-inclusive; calibration is not subtracted and the native throughput gap is not classified as removable overhead. Response preparation precedes terminal arbitration; its measured preparation-to-submit interval includes the native allocation/copy, managed arbitration, and submission handoff.
+
+Experimental ingress preserves one notification per queued request. Prepared responses transfer ownership only on successful submission, losing producers release their commands, and startup failures retire waiters/fibers before native teardown. Child-process deadlines escalate through timed wait, termination, a second timed wait, and forced termination. Root failures survive cleanup errors; because Jolt does not support adding suppressed exceptions, secondary cleanup failures are attached in `ExceptionInfo` data with the original failure as cause.
 
 Measured runner results and the implementation sequence are in [PLAN.md](PLAN.md#runner-baseline-2026-11-21), including the [verified single-request profile](PLAN.md#single-request-profile-verified-runner-results). Raw samples, environment metadata, and load-generator output are attached to the linked GitHub runs.

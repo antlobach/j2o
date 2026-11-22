@@ -5,6 +5,7 @@
             [j2o.experiments.bridge :as bridge]
             [j2o.experiments.server :as fixture]
             [j2o.experiments.wire :as wire]
+            [j2o.experiments.process :as child]
             [jolt.fibers :as fib]))
 
 (defn check! [label expected actual]
@@ -42,11 +43,10 @@
                      #(try (let [client (wire/connect port)] (wire/close! client) true)
                            (catch Exception _ false)))
         {:port port :process process}
-        (catch Throwable t (.destroy process) (throw t))))))
+        (catch Throwable t (child/preserve! t #(child/terminate! process)) (throw t))))))
 
 (defn stop-reference! [reference]
-  (.destroy (:process reference))
-  (.waitFor (:process reference)))
+  (child/terminate! (:process reference)))
 
 (defn signature [response]
   [(:status response) (vec (:body response)) (get-in response [:headers "content-length"])])

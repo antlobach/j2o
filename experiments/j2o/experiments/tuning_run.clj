@@ -5,6 +5,7 @@
             [j2o.experiments.bench :as bench]
             [j2o.experiments.differential :as checks]
             [j2o.experiments.profile-run :as profiling]
+            [j2o.experiments.process :as child]
             [j2o.experiments.tuning-micro :as micro]))
 
 (def variants [:poller :waiter :poller-scratch :waiter-scratch])
@@ -23,7 +24,7 @@
         writer (java.io.OutputStreamWriter. (.getOutputStream process))
         primary (atom nil)]
     (try
-      (let [ready (.readLine reader)]
+      (let [ready (child/read-line! reader 15000)]
         (when-not (and ready (str/starts-with? ready "READY "))
           (throw (ex-info "Tuning server did not start" {:variant variant :ready ready})))
         (let [port (Long/parseLong (second (str/split ready #" ")))]
@@ -50,12 +51,13 @@
       (finally (profiling/finish-process! process writer reader destination @primary)))))
 
 (defn native-case! [concurrency round]
-  (let [reference (checks/start-reference!)]
+  (let [reference (checks/start-reference!) primary (atom nil)]
     (try
       (bench/sample! :tuning-native (:port reference) (.pid (:process reference)) concurrency round true)
       (assoc (bench/sample! :tuning-native (:port reference) (.pid (:process reference)) concurrency round false)
              :variant :native :mode :off :phase :http :interpretation :transport-ceiling-not-ring-equivalent)
-      (finally (checks/stop-reference! reference)))))
+      (catch Throwable t (reset! primary t) (throw t))
+      (finally (child/preserve! @primary #(checks/stop-reference! reference))))))
 
 (defn -main [& _]
   (when-not (and (= "true" (System/getenv "GITHUB_ACTIONS"))

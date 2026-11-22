@@ -2,12 +2,12 @@
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
-            [j2o.experiments.bench :as bench])
-  (:import [java.util.concurrent TimeUnit]))
+            [j2o.experiments.bench :as bench]
+            [j2o.experiments.process :as child]))
 
 (defn command! [writer reader command expected]
   (.write writer (str command "\n")) (.flush writer)
-  (let [reply (.readLine reader)]
+  (let [reply (child/read-line! reader 15000)]
     (when-not (= expected reply)
       (throw (ex-info "Profiling server protocol failed" {:command command :expected expected :reply reply})))))
 
@@ -40,12 +40,7 @@
         attempt (fn [f] (try (f) (catch Throwable t (swap! errors conj t) nil)))]
     (when (.isAlive process)
       (attempt #(do (.write writer "stop\n") (.flush writer))))
-    (when-not (attempt #(.waitFor process 5000 TimeUnit/MILLISECONDS))
-      (attempt #(.destroy process))
-      (when-not (attempt #(.waitFor process 2000 TimeUnit/MILLISECONDS))
-        (attempt #(.destroyForcibly process))
-        (when-not (attempt #(.waitFor process 2000 TimeUnit/MILLISECONDS))
-          (swap! errors conj (ex-info "Child did not exit after forced termination" {:destination destination})))))
+    (attempt #(child/await! process 5000))
     (when-not (.isAlive process)
       (attempt #(let [exit (.exitValue process)
                       output (slurp reader)]
@@ -71,7 +66,7 @@
         writer (java.io.OutputStreamWriter. (.getOutputStream process))
         primary (atom nil)]
     (try
-      (let [ready (.readLine reader)]
+      (let [ready (child/read-line! reader 15000)]
         (when-not (and ready (str/starts-with? ready "READY "))
           (throw (ex-info "Profiling server did not start" {:mode mode :output ready})))
         (let [port (Long/parseLong (second (str/split ready #" ")))

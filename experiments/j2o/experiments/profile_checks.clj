@@ -4,6 +4,7 @@
             [j2o.experiments.profiling :as profiling]
             [j2o.experiments.profile-server :as server]
             [j2o.experiments.profile-run :as runner]
+            [j2o.experiments.process :as child]
             [j2o.experiments.wire :as wire]
             [j2o.experiments.tuning-report :as report]
             [jolt.ffi :as ffi]
@@ -171,6 +172,35 @@
           (checks/check! :ingress-root-failure-survives-dispatch-error failure (ex-cause caught))
           (checks/check! :derived-dispatch-error-is-retained 1 (count (:cleanup-errors (ex-data caught)))))))))
 
+(defn child-deadlines! []
+  (let [file (java.io.File/createTempFile "j2o-child-" ".log")
+        builder (ProcessBuilder. ["sh" "-c" "trap '' TERM; printf ready; exec sleep 60"])
+        _ (.redirectOutput builder file)
+        process (.start builder)]
+    (try
+      (checks/eventually! :child-installed-term-handler #(= "ready" (slurp file)))
+      (let [caught (try (child/await! process 20) nil (catch Throwable t t))]
+        (checks/check! :child-deadline-remains-primary 20 (:timeout-ms (ex-data caught)))
+        (checks/check! :term-resistant-child-was-reaped false (.isAlive process)))
+      (finally
+        (when (.isAlive process) (child/terminate! process))
+        (.delete file))))
+  (let [process (.start (ProcessBuilder. ["sh" "-c" "printf R; exec sleep 60"]))
+        reader (java.io.BufferedReader. (java.io.InputStreamReader. (.getInputStream process)))]
+    (try
+      (checks/eventually! :partial-protocol-line-is-ready #(.ready reader))
+      (checks/check! :partial-protocol-line-cannot-hang 20
+                     (:timeout-ms (ex-data
+                                    (try (child/read-line! reader 20) nil (catch Throwable t t)))))
+      (finally
+        (child/terminate! process)
+        (.close reader))))
+  (let [primary (ex-info "primary" {:kind :load})
+        cleanup (ex-info "cleanup" {:kind :stop})
+        caught (try (child/preserve! primary #(throw cleanup)) nil (catch Throwable t t))]
+    (checks/check! :cleanup-preserves-primary-cause primary (ex-cause caught))
+    (checks/check! :cleanup-retains-secondary [cleanup] (:cleanup-errors (ex-data caught)))))
+
 (defn report-integrity! []
   (let [base {:requests 10 :requests-per-second 10 :p50-us 1 :p95-us 2 :p99-us 3
               :mismatches 0 :failures 0 :admitted 10 :answered 10 :stale 0
@@ -201,6 +231,7 @@
     (preparation-failure!)
     (failed-dispatch-cleanup!)
     (failed-ingress-cleanup!)
+    (child-deadlines!)
     (report-integrity!)
     (doseq [mode [:timings :allocations]]
       (bounded! mode)

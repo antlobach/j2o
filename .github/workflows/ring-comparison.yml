@@ -1,0 +1,72 @@
+name: Native H2O versus ring-chez
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'experiments/ring_comparison*'
+      - '.github/workflows/ring-comparison.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ring-comparison-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  direct-comparison:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        body-bytes: [13, 16384]
+    env:
+      JOLT_VERSION: v0.8.27
+      RING_REFERENCE_DIR: ${{ runner.temp }}/ring-chez-reference
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install native tools and load generator
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake pkg-config libssl-dev zlib1g-dev wrk curl python3
+      - name: Install pinned Jolt with checksum verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="jolt-${JOLT_VERSION}-x86_64-linux"
+          base="https://github.com/jolt-lang/jolt/releases/download/${JOLT_VERSION}"
+          curl -fsSL -o "$RUNNER_TEMP/jolt.tar.gz" "$base/$name.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/jolt.sha256" "$base/$name.tar.gz.sha256"
+          read -r expected _ < "$RUNNER_TEMP/jolt.sha256"
+          actual="$(sha256sum "$RUNNER_TEMP/jolt.tar.gz")"
+          test "${actual%% *}" = "$expected"
+          tar -xzf "$RUNNER_TEMP/jolt.tar.gz" -C "$RUNNER_TEMP"
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "$RUNNER_TEMP/$name/jolt" "$HOME/.local/bin/jolt"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Check out unmodified pinned ring-chez outside j2o
+        run: |
+          mkdir -p "$RING_REFERENCE_DIR"
+          git -C "$RING_REFERENCE_DIR" init
+          git -C "$RING_REFERENCE_DIR" remote add origin https://github.com/jolt-lang/ring-chez-adapter.git
+          git -C "$RING_REFERENCE_DIR" fetch --depth 1 origin e37d52f92c1c50d0a9af360e1d994554ec48f202
+          git -C "$RING_REFERENCE_DIR" checkout --detach FETCH_HEAD
+      - name: Build external release-mode stock H2O
+        run: bash experiments/build.sh
+      - name: Exercise every actual server and load-validation path
+        run: python3 -u experiments/ring_comparison.py --body-bytes ${{ matrix.body-bytes }} --smoke
+      - name: Five-round matched HTTP/1.1 comparison
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -u experiments/ring_comparison.py --body-bytes ${{ matrix.body-bytes }} | tee .cache/ring-comparison-${{ matrix.body-bytes }}-driver.log
+          cat .cache/ring-comparison-${{ matrix.body-bytes }}/report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve complete raw evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: h2o-ring-chez-${{ matrix.body-bytes }}-${{ github.sha }}
+          include-hidden-files: true
+          path: .cache/ring-comparison*
+          if-no-files-found: warn

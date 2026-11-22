@@ -81,6 +81,8 @@ J2O_API int j2o_server_event_fd(j2o_server *server);
  * enumerate pairs; field IDs 1..5 are method, raw target, body, authority and
  * peer address. Events and response commands own their bytes, never Jolt data. */
 J2O_API unsigned j2o_server_port(j2o_server *server);
+/* 1: open connections, 2: admitted requests, 3: currently live requests. */
+J2O_API uint64_t j2o_server_stat(j2o_server *server, unsigned key);
 J2O_API j2o_result j2o_event_take(j2o_server *server, j2o_event **event, j2o_error *error);
 J2O_API unsigned j2o_event_kind(const j2o_event *event);
 J2O_API void j2o_event_id(const j2o_event *event, j2o_id *id);

@@ -147,9 +147,11 @@ struct j2o_server {
     h2o_socket_t *control_socket;
     h2o_accept_ctx_t accept;
     j2o_connection *connections;
-    size_t connection_count;
+    _Atomic size_t connection_count;
     request_slot *slots;
-    size_t slot_count, live_requests;
+    size_t slot_count;
+    _Atomic size_t live_requests;
+    _Atomic uint64_t total_requests;
     j2o_event *event_head, *event_tail;
     size_t event_count;
     j2o_response *response_head, *response_tail;

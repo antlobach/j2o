@@ -96,6 +96,7 @@ static int on_unary_request(h2o_handler_t *handler, h2o_req_t *request)
     *guard = (request_guard){server, event->id};
     pthread_mutex_lock(&server->mutex);
     ++server->live_requests;
+    ++server->total_requests;
     enqueue_event_locked(server, event);
     pthread_mutex_unlock(&server->mutex);
     return 0;
@@ -130,6 +131,16 @@ static void accept_unary(h2o_socket_t *listener_socket, const char *error)
     h2o_accept(&server->accept, socket);
 }
 unsigned j2o_server_port(j2o_server *server) { return server == NULL ? 0 : server->port; }
+uint64_t j2o_server_stat(j2o_server *server, unsigned key)
+{
+    if (server == NULL) return 0;
+    switch (key) {
+    case 1: return atomic_load(&server->connection_count);
+    case 2: return atomic_load(&server->total_requests);
+    case 3: return atomic_load(&server->live_requests);
+    default: return 0;
+    }
+}
 j2o_result j2o_event_take(j2o_server *server, j2o_event **out, j2o_error *error)
 {
     if (out != NULL) *out = NULL;

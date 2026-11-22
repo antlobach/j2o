@@ -33,6 +33,7 @@
 (ffi/defcfn server-start* "j2o_server_start" [:pointer :pointer :pointer] :int :blocking)
 (ffi/defcfn event-fd "j2o_server_event_fd" [:pointer] :int)
 (ffi/defcfn server-port "j2o_server_port" [:pointer] :uint32)
+(ffi/defcfn server-stat "j2o_server_stat" [:pointer :uint32] :uint64)
 (ffi/defcfn event-take* "j2o_event_take" [:pointer :pointer :pointer] :int :blocking)
 (ffi/defcfn event-kind "j2o_event_kind" [:pointer] :uint32)
 (ffi/defcfn event-id* "j2o_event_id" [:pointer :pointer] :void)

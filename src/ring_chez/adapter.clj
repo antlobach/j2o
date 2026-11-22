@@ -11,7 +11,7 @@
    :max-live-requests [6 1 Integer/MAX_VALUE]
    :max-event-queue [7 1 Long/MAX_VALUE]
    :max-response-queue [8 1 Long/MAX_VALUE]
-   :max-queued-bytes [9 1 Long/MAX_VALUE]
+   :max-queued-bytes [9 128 Long/MAX_VALUE]
    :max-connections [10 1 Long/MAX_VALUE]
    :keep-alive-timeout-ms [11 1 Long/MAX_VALUE]
    :request-timeout-ms [12 0 Long/MAX_VALUE]
@@ -81,3 +81,6 @@
     (throw (ex-info "Handler must be a function or Var" {:given handler})))
   (reset! (:handler server) handler)
   server)
+
+(defn server-stats [server]
+  (runtime/stats server))

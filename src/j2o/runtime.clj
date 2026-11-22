@@ -48,13 +48,21 @@
         (cancel-timer! job)
         (try
           (submit-command! server job command)
-          (catch Throwable error
-            ;; A response larger than the native byte budget cannot be queued.
-            ;; Give the request one small failure response under the same claim.
-            (when (and @(:alive server) (not @(:retired job)))
-              (submit-command! server job
-                (response/create! (:id job)
-                  (failure-response server job error :crash)))))))
+          (catch clojure.lang.ExceptionInfo error
+            (if (not= 1 (:result (ex-data error)))
+              (throw error)
+              (when (and @(:alive server) (not @(:retired job)))
+                ;; The initial response exceeded the native byte budget. The
+                ;; failure hook has one chance; a bad or oversized answer falls
+                ;; back to a small 500 without reopening the terminal claim.
+                (let [fallback {:status 500 :body "Internal Server Error"}
+                      command (try (response/create! (:id job) (failure-response server job error :crash))
+                                   (catch Throwable _ (response/create! (:id job) fallback)))]
+                  (try (submit-command! server job command)
+                       (catch clojure.lang.ExceptionInfo secondary
+                         (if (= 1 (:result (ex-data secondary)))
+                           (submit-command! server job (response/create! (:id job) fallback))
+                           (throw secondary))))))))))
       (native/response-release! command))))
 
 (defn- run-handler! [server job]
@@ -113,21 +121,30 @@
         (fib/kill! task (ex-info "request retired" {:kind :retired})))
       (swap! (:requests server) dissoc key))))
 
+(defn- record-fault! [server kind error]
+  (swap! (:faults server) inc)
+  (reset! (:last-fault server) {:kind kind :error (str error) :at (System/currentTimeMillis)}))
+
 (defn- dispatch-loop! [server]
-  (while @(:running server)
-    (if-let [event (native/event-take! (:native server))]
-      (try
-        (case (native/event-kind event)
-          1 (dispatch-request! server event)
-          2 (retire! server event)
-          (throw (ex-info "Unknown native event" {})))
-        (finally (native/event-release! event)))
-      (poller/wait-ready (:fd server) :read))))
+  (try
+    (while @(:running server)
+      (if-let [event (native/event-take! (:native server))]
+        (try
+          (case (native/event-kind event)
+            1 (dispatch-request! server event)
+            2 (retire! server event)
+            (throw (ex-info "Unknown native event" {})))
+          (finally (native/event-release! event)))
+        (poller/wait-ready (:fd server) :read)))
+    (catch Throwable error
+      (when @(:running server)
+        (record-fault! server :dispatcher error)
+        (try (native/force-stop! (:native server)) (catch Throwable _ nil))))))
 
 (defn- worker-loop! [server]
   (loop []
     (when-let [job (async/<!! (:work server))]
-      (try (run-handler! server job) (catch Throwable _ nil))
+      (try (run-handler! server job) (catch Throwable error (record-fault! server :worker error)))
       (recur))))
 
 (defn start! [native-server handler opts]
@@ -138,7 +155,9 @@
                 :handler-on-fiber (boolean (:handler-on-fiber opts))
                 :timeout-ms (get opts :handler-timeout-ms 0)
                 :running (atom true) :alive (atom true) :requests (atom {})
-                :fibers (atom #{}) :pool pool :stop-lock (Object.) :destroyed (atom false)
+                :fibers (atom #{}) :pool pool :stop-lock (Object.) :stats-lock (Object.)
+                :destroyed (atom false) :final-counts (atom nil)
+                :faults (atom 0) :last-fault (atom nil) :started (System/currentTimeMillis)
                 :work (async/chan (get opts :max-live-requests 1024))}
         workers (atom [])]
     (try
@@ -172,6 +191,17 @@
         (poller/forget! (:fd server))
         (fib/shutdown! pool)
         (throw error)))))
+
+(defn- counts [server]
+  {:connections (native/server-stat (:native server) 1)
+   :requests (native/server-stat (:native server) 2)
+   :active (native/server-stat (:native server) 3)})
+
+(defn stats [server]
+  (locking (:stats-lock server)
+    (merge (if @(:destroyed server) @(:final-counts server) (counts server))
+           {:faults @(:faults server) :last-fault @(:last-fault server)
+            :uptime-ms (- (System/currentTimeMillis) (:started server))})))
 
 (defn stop! [server drain-ms]
   (locking (:stop-lock server)
@@ -209,7 +239,9 @@
           (when (.isAlive worker)
             (throw (ex-info "Worker did not stop; native state retained" {})))))
       (poller/forget! (:fd server))
-      (native/server-destroy! (:native server))
-      (fib/shutdown! (:pool server))
-      (reset! (:destroyed server) true)))
+      (locking (:stats-lock server)
+        (reset! (:final-counts server) (counts server))
+        (native/server-destroy! (:native server))
+        (reset! (:destroyed server) true))
+      (fib/shutdown! (:pool server))))
   nil)

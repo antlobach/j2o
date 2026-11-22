@@ -64,6 +64,18 @@
         (equal! :failure-hook-once 1 @calls))
       (finally (adapter/stop-server server)))))
 
+(defn- oversized-failure-hook! []
+  (let [calls (atom 0)
+        large (apply str (repeat 1024 "x"))
+        server (adapter/run-server (fn [_] {:status 200 :body large})
+                 {:port 0 :worker-threads 1 :max-queued-bytes 128
+                  :on-failure (fn [_ _] (swap! calls inc) {:status 501 :body large})})]
+    (try
+      (let [result (wire/request! (:port server) "/")]
+        (equal! :oversized-hook-fallback 500 (:status result))
+        (equal! :oversized-hook-once 1 @calls))
+      (finally (adapter/stop-server server)))))
+
 (defn- graceful-drain! []
   (let [entered (promise) release (promise)
         server (adapter/run-server (fn [_] (deliver entered true) @release {:status 200 :body "drained"})
@@ -72,11 +84,15 @@
     (try
       (wire/send! client "GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n")
       (equal! :handler-entered true (deref entered 5000 false))
+      (equal! :active-stats {:connections 1 :requests 1 :active 1 :faults 0}
+              (select-keys (adapter/server-stats server) [:connections :requests :active :faults]))
       (native/begin-drain! (:native server))
       (let [stopped (future (adapter/stop-server server))]
         (deliver release true)
         (equal! :drain-response "drained" (wire/text (wire/response! client)))
-        (equal! :drain-completed nil (deref stopped 5000 ::timeout)))
+        (equal! :drain-completed nil (deref stopped 5000 ::timeout))
+        (equal! :stopped-stats {:connections 0 :requests 1 :active 0 :faults 0}
+                (select-keys (adapter/server-stats server) [:connections :requests :active :faults])))
       (finally
         (deliver release true)
         (wire/close! client)
@@ -86,6 +102,7 @@
   (request-and-swap!)
   (direct-fiber!)
   (deadline!)
+  (oversized-failure-hook!)
   (failure-and-byte-budget!)
   (graceful-drain!)
   (println "all passed: Ring HTTP request mapping, handler swap, executor and deadline"))
